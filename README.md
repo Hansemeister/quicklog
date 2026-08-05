@@ -5,7 +5,7 @@ timestamped entry to today's markdown file.
 
 ## Requirements
 
-- macOS 15+ (`TextSelection`, used to place the caret when editing)
+- macOS 14+
 - Xcode Command Line Tools (`swift`)
 - [`just`](https://github.com/casey/just) (optional — see *Without just* below)
 
@@ -95,8 +95,10 @@ threshold. Right-click gives *Edit* and *Delete*. Hovering an entry tints its
 background to show it's clickable.
 
 The inline editor is a plain SwiftUI `TextEditor`. It takes focus via
-`@FocusState` and places the caret with `TextSelection(insertionPoint:)` — that
-selection API is what requires macOS 15. `⌘↩` saves and `esc` cancels the edit;
+`@FocusState`. The caret is moved to the end of the note on the text view
+itself (`moveCaretToEnd`) — SwiftUI parks it at offset 0 when the editor takes
+focus, and writing a `TextSelection` back loses the race with that.
+`⌘↩` saves and `esc` cancels the edit;
 `esc` is routed through `QuicklogPanel.onCancel`, so it cancels an open edit and
 only hides the panel when nothing is being edited.
 

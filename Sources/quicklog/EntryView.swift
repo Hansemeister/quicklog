@@ -8,8 +8,6 @@ struct EntryView: View {
     @State private var showPreview = false
     @State private var hoveredEntryID: String?
     @FocusState private var editorFocused: Bool
-    /// Caret position for the inline editor — set to end-of-text when it opens.
-    @State private var editSelection: TextSelection?
 
     /// Composer height, dragged via the divider and remembered across launches.
     @AppStorage("quicklog.composerHeight") private var composerHeight: Double = 150
@@ -143,7 +141,7 @@ struct EntryView: View {
     /// empty body deletes the entry (undo with the toolbar button).
     private var inlineEditor: some View {
         VStack(alignment: .leading, spacing: 6) {
-            TextEditor(text: $store.editDraft, selection: $editSelection)
+            TextEditor(text: $store.editDraft)
                 .font(.system(.body, design: .monospaced))
                 .scrollContentBackground(.hidden)
                 .focused($editorFocused)
@@ -154,15 +152,13 @@ struct EntryView: View {
                     RoundedRectangle(cornerRadius: 4)
                         .stroke(Color.secondary.opacity(0.3))
                 )
-                .onAppear {
-                    editorFocused = true
-                    // One hop later: taking focus resets the caret to offset 0,
-                    // so the caret has to be placed after that has happened.
-                    DispatchQueue.main.async {
-                        editSelection = TextSelection(
-                            insertionPoint: store.editDraft.endIndex
-                        )
-                    }
+                .onAppear { editorFocused = true }
+                .onChange(of: editorFocused) { _, focused in
+                    // SwiftUI parks the caret at offset 0 when the editor takes
+                    // focus, and writing a TextSelection back loses the race
+                    // with it. Move the caret on the text view itself, once
+                    // focus has actually landed.
+                    if focused { DispatchQueue.main.async { moveCaretToEnd() } }
                 }
             HStack(spacing: 8) {
                 Text("Clear the text to delete this entry.")
@@ -179,6 +175,15 @@ struct EntryView: View {
     }
 
     private var bottomAnchor: String { "bottom" }
+
+    /// Puts the caret at the end of whichever text view currently has focus —
+    /// the inline editor, when this runs.
+    private func moveCaretToEnd() {
+        guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView else { return }
+        let end = (editor.string as NSString).length
+        editor.setSelectedRange(NSRange(location: end, length: 0))
+        editor.scrollRangeToVisible(NSRange(location: end, length: 0))
+    }
 
     // MARK: Resizable split
 

@@ -6,18 +6,45 @@ struct EntryView: View {
     @ObservedObject var store: JournalStore
     @FocusState private var composerFocused: Bool
     @State private var showPreview = false
+    @State private var hoveredEntryID: String?
+    @FocusState private var editorFocused: Bool
+    /// Caret position for the inline editor — set to end-of-text when it opens.
+    @State private var editSelection: TextSelection?
+
+    /// Composer height, dragged via the divider and remembered across launches.
+    @AppStorage("quicklog.composerHeight") private var composerHeight: Double = 150
+    @State private var dragStartHeight: Double?
+
+    private let minComposerHeight: Double = 110
+    private let maxComposerHeight: Double = 520
+    /// The entry list never shrinks past this, so the handle always stays
+    /// reachable and both panes stay usable.
+    private let minEntriesHeight: Double = 120
+    private let handleHeight: Double = 11
 
     var body: some View {
-        VStack(spacing: 0) {
-            entryList
-            Divider()
-            if store.isViewingToday {
-                composer
-            } else {
-                readOnlyNotice
+        GeometryReader { geo in
+            VStack(spacing: 0) {
+                entryList
+                if store.isViewingToday {
+                    resizeHandle(available: geo.size.height)
+                    composer
+                        .frame(height: clamped(composerHeight, available: geo.size.height))
+                } else {
+                    Divider()
+                    pastDayNotice
+                }
             }
         }
         .navigationTitle(store.selectedDay)
+    }
+
+    /// Keeps the composer between its own minimum and whatever leaves the entry
+    /// list at least `minEntriesHeight` — also applied on render, so shrinking
+    /// the window can't strand the divider off-screen.
+    private func clamped(_ height: Double, available: Double) -> Double {
+        let ceiling = max(minComposerHeight, available - minEntriesHeight - handleHeight)
+        return min(max(height, minComposerHeight), min(maxComposerHeight, ceiling))
     }
 
     // MARK: Entries
@@ -32,19 +59,16 @@ struct EntryView: View {
                             .padding(.top, 24)
                     }
                     ForEach(store.entries) { entry in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(entry.time)
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                            MarkdownText(entry.body)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .id(entry.id)
+                        entryRow(entry)
+                            .id(entry.id)
                     }
                     Color.clear.frame(height: 1).id(bottomAnchor)
                 }
                 .padding(20)
+                .animation(.easeInOut(duration: 0.22), value: store.entries.map(\.id))
+                .animation(.easeInOut(duration: 0.12), value: hoveredEntryID)
             }
+            .frame(maxHeight: .infinity)
             .onChange(of: store.entries.count) { _, _ in
                 withAnimation { proxy.scrollTo(bottomAnchor, anchor: .bottom) }
             }
@@ -54,7 +78,139 @@ struct EntryView: View {
         }
     }
 
+    private func entryRow(_ entry: Entry) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(entry.time)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                if store.isEditing(entry) {
+                    Text("editing")
+                        .font(.caption2)
+                        .foregroundStyle(.tint)
+                }
+                Spacer()
+            }
+
+            if store.isEditing(entry) {
+                inlineEditor
+            } else {
+                MarkdownText(entry.body)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.primary.opacity(
+                    hoveredEntryID == entry.id && !store.isEditing(entry) ? 0.06 : 0
+                ))
+        )
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if inside {
+                hoveredEntryID = entry.id
+            } else if hoveredEntryID == entry.id {
+                hoveredEntryID = nil
+            }
+        }
+        // Click the text to edit it. `simultaneousGesture` so the text view still
+        // gets the click for selection, and TapGesture's own movement threshold
+        // means a drag to highlight for copying does not trigger this.
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                guard !store.isEditing(entry) else { return }
+                store.beginEdit(entry)
+            }
+        )
+        .contextMenu {
+            Button("Edit") { store.beginEdit(entry) }
+            Button("Delete", role: .destructive) { store.delete(entry) }
+        }
+        // Fade + collapse on delete — the macOS convention for a row leaving a
+        // list (Mail, Reminders, Notes).
+        .transition(
+            .asymmetric(
+                insertion: .opacity,
+                removal: .opacity.combined(with: .scale(scale: 0.92, anchor: .topLeading))
+            )
+        )
+    }
+
+    /// In-place editor for an existing entry. Writes back to that entry's own
+    /// day file — the file name and `## HH:mm` stamp are untouched. Saving an
+    /// empty body deletes the entry (undo with the toolbar button).
+    private var inlineEditor: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextEditor(text: $store.editDraft, selection: $editSelection)
+                .font(.system(.body, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .focused($editorFocused)
+                .frame(minHeight: 90, maxHeight: 280)
+                .padding(2)
+                .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color.secondary.opacity(0.3))
+                )
+                .onAppear {
+                    editorFocused = true
+                    // One hop later: taking focus resets the caret to offset 0,
+                    // so the caret has to be placed after that has happened.
+                    DispatchQueue.main.async {
+                        editSelection = TextSelection(
+                            insertionPoint: store.editDraft.endIndex
+                        )
+                    }
+                }
+            HStack(spacing: 8) {
+                Text("Clear the text to delete this entry.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel") { store.cancelEdit() }
+                Button(store.editDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                       ? "Delete" : "Save") { store.commitEdit() }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+
     private var bottomAnchor: String { "bottom" }
+
+    // MARK: Resizable split
+
+    /// Drag to change the entries/composer ratio.
+    ///
+    /// The gesture must measure in `.global` space: in local space the handle
+    /// moves as the height changes, so each frame reads a shifted origin and the
+    /// divider oscillates under the cursor.
+    private func resizeHandle(available: Double) -> some View {
+        ZStack {
+            Divider()
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color.secondary.opacity(0.35))
+                .frame(width: 44, height: 4)
+        }
+        .frame(height: handleHeight)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if inside { NSCursor.resizeUpDown.set() } else { NSCursor.arrow.set() }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { value in
+                    let base = dragStartHeight ?? composerHeight
+                    if dragStartHeight == nil { dragStartHeight = base }
+                    let dy = value.location.y - value.startLocation.y
+                    composerHeight = clamped(base - dy, available: available)
+                }
+                .onEnded { _ in dragStartHeight = nil }
+        )
+        .help("Drag to resize")
+    }
 
     // MARK: Composer
 
@@ -65,7 +221,7 @@ struct EntryView: View {
                     .font(.system(.body, design: .monospaced))
                     .scrollContentBackground(.hidden)
                     .focused($composerFocused)
-                    .frame(minHeight: 90, maxHeight: 160)
+                    .frame(maxHeight: .infinity)
                 if store.draft.isEmpty {
                     Text("What's on your mind?  (markdown: # header, **bold**, *italic*, - bullet)")
                         .foregroundStyle(.tertiary)
@@ -83,7 +239,7 @@ struct EntryView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 18)
                 }
-                .frame(maxHeight: 140)
+                .frame(maxHeight: max(60, composerHeight * 0.4))
                 .background(Color(nsColor: .underPageBackgroundColor).opacity(0.4))
             }
 
@@ -110,11 +266,16 @@ struct EntryView: View {
         .onAppear { composerFocused = true }
     }
 
-    private var readOnlyNotice: some View {
+    private var pastDayNotice: some View {
         HStack {
-            Image(systemName: "lock")
-            Text("Past day — read only.")
+            Image(systemName: "clock.arrow.circlepath")
+            Text("Past day — edit or delete entries here; new entries go to today.")
             Spacer()
+            if let error = store.lastError {
+                Text(error)
+                    .foregroundStyle(.red)
+                    .lineLimit(1)
+            }
             Button("Jump to Today") { store.select(store.todayKey) }
                 .controlSize(.small)
         }

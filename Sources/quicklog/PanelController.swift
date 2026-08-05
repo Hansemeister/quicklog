@@ -6,9 +6,16 @@ final class QuicklogPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
-    /// Esc hides the panel instead of closing/destroying it.
+    /// What esc does. Set by `PanelController` so an in-progress entry edit is
+    /// cancelled first and only a second esc hides the panel.
+    var onCancel: (() -> Void)?
+
     override func cancelOperation(_ sender: Any?) {
-        orderOut(nil)
+        if let onCancel {
+            onCancel()
+        } else {
+            orderOut(nil)
+        }
     }
 }
 
@@ -41,15 +48,16 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     func hide() {
-        saveFrame()
         panel?.orderOut(nil)
     }
 
     // MARK: Frame persistence
+    //
+    // windowDidMove/windowDidResize fire live, so the stored frame is always
+    // current — no need to save on hide or close.
 
     func windowDidMove(_ notification: Notification) { saveFrame() }
     func windowDidResize(_ notification: Notification) { saveFrame() }
-    func windowWillClose(_ notification: Notification) { saveFrame() }
 
     func saveFrame() {
         guard let panel, panel.isVisible else { return }
@@ -62,9 +70,8 @@ final class PanelController: NSObject, NSWindowDelegate {
             return
         }
         let rect = NSRectFromString(saved)
-        // Ignore junk or a frame left on a screen that is no longer attached.
-        let onScreen = NSScreen.screens.contains { $0.visibleFrame.intersects(rect) }
-        guard rect.width >= 300, rect.height >= 200, onScreen else {
+        // Ignore a frame left on a screen that is no longer attached.
+        guard NSScreen.screens.contains(where: { $0.visibleFrame.intersects(rect) }) else {
             panel.center()
             return
         }
@@ -76,7 +83,9 @@ final class PanelController: NSObject, NSWindowDelegate {
     private func makePanel() -> QuicklogPanel {
         let panel = QuicklogPanel(
             contentRect: NSRect(x: 0, y: 0, width: 860, height: 560),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView, .utilityWindow],
+            // No .fullSizeContentView: the header bar must sit below the
+            // titlebar, not under the traffic lights.
+            styleMask: [.titled, .closable, .resizable, .utilityWindow],
             backing: .buffered,
             defer: false
         )
@@ -91,6 +100,14 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentMinSize = NSSize(width: 620, height: 380)
         panel.delegate = self
+        panel.onCancel = { [weak self] in
+            guard let self else { return }
+            if store.editingEntryID != nil {
+                store.cancelEdit()
+            } else {
+                hide()
+            }
+        }
 
         let hosting = NSHostingView(rootView: RootView(store: store))
         hosting.frame = panel.contentLayoutRect
@@ -105,14 +122,74 @@ final class PanelController: NSObject, NSWindowDelegate {
 
 struct RootView: View {
     @ObservedObject var store: JournalStore
+    @State private var hoverHint: String?
 
     var body: some View {
-        NavigationSplitView {
-            SidebarView(store: store)
-                .navigationSplitViewColumnWidth(min: 170, ideal: 200, max: 280)
-        } detail: {
-            EntryView(store: store)
+        VStack(spacing: 0) {
+            headerBar
+            Divider()
+            NavigationSplitView {
+                SidebarView(store: store)
+                    .navigationSplitViewColumnWidth(min: 170, ideal: 200, max: 280)
+            } detail: {
+                EntryView(store: store)
+            }
         }
         .frame(minWidth: 620, minHeight: 380)
+    }
+
+    /// Undo/redo for entry changes (save, edit, delete). Buttons rather than a
+    /// key binding — ⌘Z belongs to the text field, and a second chord for the
+    /// journal was invisible.
+    private var headerBar: some View {
+        HStack(spacing: 4) {
+            headerButton(
+                systemName: "arrow.uturn.backward",
+                hint: "Undo last change",
+                enabled: store.canUndo,
+                action: store.undo
+            )
+            headerButton(
+                systemName: "arrow.uturn.forward",
+                hint: "Redo last change",
+                enabled: store.canRedo,
+                action: store.redo
+            )
+
+            // Fixed slot, so revealing the label never reflows the bar.
+            Text(hoverHint ?? " ")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .opacity(hoverHint == nil ? 0 : 1)
+                .animation(.easeInOut(duration: 0.12), value: hoverHint)
+                .padding(.leading, 4)
+
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 5)
+        .background(.bar)
+    }
+
+    private func headerButton(
+        systemName: String,
+        hint: String,
+        enabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .frame(width: 20, height: 18)
+        }
+        .buttonStyle(.borderless)
+        .disabled(!enabled)
+        .help(hint)
+        .onHover { inside in
+            if inside {
+                hoverHint = enabled ? hint : "\(hint) — nothing to do"
+            } else if hoverHint?.hasPrefix(hint) == true {
+                hoverHint = nil
+            }
+        }
     }
 }

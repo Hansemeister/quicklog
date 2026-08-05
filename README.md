@@ -5,7 +5,7 @@ timestamped entry to today's markdown file.
 
 ## Requirements
 
-- macOS 14+
+- macOS 15+ (`TextSelection`, used to place the caret when editing)
 - Xcode Command Line Tools (`swift`)
 - [`just`](https://github.com/casey/just) (optional — see *Without just* below)
 
@@ -19,10 +19,36 @@ just start     # build, bundle, launch detached like a normal app
 just restart   # kill running instance + relaunch
 just stop      # kill running instance
 just install   # copy to /Applications
+just test      # run storage tests
 ```
 
 The app has no Dock icon (`LSUIElement`). It lives in the menu bar (pencil icon)
 and on the hotkey.
+
+**Only one instance can run.** Launching a second one makes the running instance
+show its panel, then exits. Enforced with an advisory `flock` on
+`~/Library/Application Support/quicklog/.instance.lock` — the kernel drops it
+when the process dies, so a crash can't leave it stuck, and it works for both
+`just run` (bare binary) and `just start` (bundle).
+
+### Start at login
+
+Menu-bar icon → **Start at Login** (a checkmark shows the current state). Uses
+`SMAppService.mainApp`, so macOS registers the bundle *at its current path*:
+
+```sh
+just install   # → /Applications/quicklog.app, then enable it from there
+```
+
+Enabling it from `.build/quicklog.app` works but breaks on `just clean`. If
+macOS refuses the registration, an alert says so instead of failing silently.
+
+### If the hotkey doesn't work
+
+`⌘⇧Space` can already be taken (Spotlight, Alfred, input-source switching). When
+registration fails the menu-bar icon turns into a warning triangle and the menu
+says so — the app still works, open it from that menu. Change the combination in
+`Sources/quicklog/QuicklogApp.swift` → `registerHotkey()`.
 
 ### Without just
 
@@ -40,11 +66,68 @@ cp Resources/Info.plist .build/quicklog.app/Contents/Info.plist
 | --- | --- |
 | `⌘⇧Space` | toggle panel (global) |
 | `⌘↩` | save entry |
-| `⌘A` `⌘C` `⌘X` `⌘V` `⌘Z` | select all / copy / cut / paste / undo |
+| `⌘A` `⌘C` `⌘X` `⌘V` `⌘Z` | select all / copy / cut / paste / undo (text) |
 | `esc` or `⌘W` | hide panel |
 | `⌘Q` | quit |
 
-Change the hotkey in `Sources/quicklog/QuicklogApp.swift` → `registerHotkey()`.
+While editing an entry: `⌘↩` saves, the *Cancel* button discards.
+
+`⌘Z` is the text field's own undo. Undoing an *entry* change (save/edit/delete)
+is done with the two arrow buttons at the top of the window, not a shortcut.
+
+## Undo / redo
+
+Two arrow buttons at the top of the window, left of everything else. They grey
+out when there is nothing to undo/redo, and show a text label next to them on
+hover. Covers saves, edits and deletes; 50 steps deep; a new change clears the
+redo stack. Undo jumps the sidebar to the affected day.
+
+Implemented as whole-file snapshots (`before`/`after` text per change) rather
+than per-entry diffs — a day file is a few KB, and it can't drift out of sync
+with the parser. The stack is in-memory only, so it resets when the app quits.
+
+## Editing and deleting
+
+**Click an entry's text to edit it.** The editor opens focused with the caret at
+the end of the note, so you can type straight away. Dragging to highlight text
+for copying does not trigger edit mode — the tap gesture has a movement
+threshold. Right-click gives *Edit* and *Delete*. Hovering an entry tints its
+background to show it's clickable.
+
+The inline editor is a plain SwiftUI `TextEditor`. It takes focus via
+`@FocusState` and places the caret with `TextSelection(insertionPoint:)` — that
+selection API is what requires macOS 15. `⌘↩` saves and `esc` cancels the edit;
+`esc` is routed through `QuicklogPanel.onCancel`, so it cancels an open edit and
+only hides the panel when nothing is being edited.
+
+There is no delete button — **clear the text in the editor and save to delete
+the entry** (the Save button relabels itself to *Delete* when the text is
+empty). Deleted rows fade and collapse out of the list.
+
+Edits rewrite **that entry's own day file** in place:
+
+- the file keeps its `YYYY-MM-DD.md` name — an edited old entry never moves to
+  today's file
+- the `# YYYY-MM-DD` title, any hand-written preamble, and every other entry's
+  `## HH:mm` stamp are preserved
+- the edited entry keeps its original timestamp
+
+Deleting the last entry removes the file so the day drops out of the sidebar —
+unless the file has hand-written preamble text, which is kept.
+
+Entry identity is content-derived (`HH:mm#occurrence#body`) rather than a fresh
+UUID per parse, so surviving rows keep their identity across a reload and only
+the deleted row animates.
+
+## Layout ratio
+
+Drag the handle between the entry list and the composer to change the split.
+The height is remembered across launches (`quicklog.composerHeight` in
+`UserDefaults`).
+
+Neither pane can collapse: the composer stays ≥110 pt and the entry list ≥120 pt,
+clamped against the window's actual height — so the handle is always reachable,
+and shrinking the window can't strand it off-screen.
 
 ## Window position
 
@@ -93,23 +176,48 @@ Headers `#`/`##`/`###`, bullets `-`/`*`/`+` with 2-space nesting, `**bold**`,
 4. `just today` in another terminal — the markdown is on disk.
 5. `esc` hides. `⌘⇧Space` from another app brings it back on top, focused.
 6. Sidebar: today is labelled *Today*. Add `~/Library/Application Support/quicklog/2026-08-01.md`
-   by hand, reopen the panel — that day is listed and read-only.
+   by hand, reopen the panel — that day is listed.
+7. Click that old entry's text — the editor opens with the caret at the end and
+   the keyboard already focused. Type, then `⌘↩`. `cat` the file: same file name,
+   same `# 2026-08-01` title, same `## HH:mm` stamp, new body.
+8. Click it again → `⌘A`, delete, `⌘↩` (button reads *Delete*). The row fades and
+   collapses; other entries intact.
+9. Click the undo arrow (top left) — the deleted entry is back. Redo arrow —
+   gone again. Both grey out when their stack is empty, and label themselves on
+   hover.
+10. Drag the handle above the composer to both extremes — it must track the
+    cursor without vibrating, and neither pane may collapse. `just restart` — the
+    split is remembered.
+11. Drag across an entry's text to highlight it, then `⌘C` — must copy without
+    entering edit mode.
+12. Drag the panel to a corner, `just restart` — it reopens in the same spot.
 
 ## TODO
 
-- **Edit / delete a past entry.** Currently append-only; past days are read
-  only. Needs: inline editor per entry, rewrite of the whole day file (parse →
-  mutate → write), and a decision on whether editing rewrites the `## HH:mm`
-  stamp or keeps it. Workaround for now: edit the `.md` file directly
-  (`just data`), then reopen the panel to pick up changes.
 - Week/month grouping in the sidebar.
 - Search.
 - Configurable hotkey in-app (hardcoded to `⌘⇧Space` today).
 - Draft is lost if the app quits before `⌘↩` — no draft persistence.
+- Undo history is in-memory; quitting clears it.
+- New entries always go to today; you can't back-date an entry to a past day.
 
-## Not implemented (per PLAN.md)
+## Tests
 
-Sync, search, export, week/month sidebar grouping, editing past entries.
+```sh
+just test
+```
+
+`Tests/main.swift` — 17 checks over storage: that a user's own `##` headers
+don't split an entry, that editing an old entry preserves its file name, title,
+preamble and every other stamp, the file layout, blank edit = delete, and the
+file-removal rules.
+
+It's a plain executable compiled against `StorageManager.swift`, not an XCTest
+target: XCTest and swift-testing ship with Xcode, and this only needs Command
+Line Tools. Exits non-zero on failure.
+
+UI behaviour (panel, hotkey, caret, drag) isn't covered — see the manual pass
+above.
 
 ## Layout
 
@@ -118,11 +226,12 @@ Package.swift
 Justfile
 Resources/Info.plist
 Sources/quicklog/
-  QuicklogApp.swift      # entry point, app delegate, global hotkey, menu bar
+  QuicklogApp.swift      # entry point, single-instance lock, hotkey, menu bar
   PanelController.swift  # floating NSPanel + root view
-  EntryView.swift        # composer, entry list, markdown renderer
+  EntryView.swift        # composer, entry list, inline editor, markdown renderer
   SidebarView.swift      # day list
-  StorageManager.swift   # flat .md read/write + JournalStore
+  StorageManager.swift   # flat .md read/write/edit/delete + JournalStore
+Tests/main.swift         # storage + undo/redo tests (just test)
 ```
 
 Sources live under `Sources/quicklog/` rather than the repo root — SwiftPM

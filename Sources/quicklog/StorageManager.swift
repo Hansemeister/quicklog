@@ -1,36 +1,26 @@
-import Combine
 import Foundation
 
 /// One journal entry: a timestamp plus a markdown body.
-struct Entry: Identifiable, Hashable {
-    let id = UUID()
+struct Entry: Identifiable {
+    /// Stable across reloads — derived from content, not freshly generated — so
+    /// SwiftUI can diff the list and animate a single row out on delete.
+    /// Duplicate timestamps are disambiguated by occurrence.
+    let id: String
     /// `HH:mm` as written to disk.
     var time: String
     var body: String
 }
 
 /// One day of entries, keyed by `YYYY-MM-DD`.
-struct Day: Identifiable, Hashable {
+struct Day: Identifiable {
     var id: String { key }
     /// `YYYY-MM-DD`
     var key: String
 }
 
 /// Reads/writes flat markdown files — one per day — in
-/// `~/Library/Application Support/quicklog/`.
-///
-/// File format:
-/// ```
-/// # 2026-08-05
-///
-/// ## 14:32
-/// entry body, may span
-/// multiple lines
-///
-/// ## 15:01
-/// next entry
-/// ```
-/// Entries are delimited by a line matching exactly `## HH:mm`.
+/// `~/Library/Application Support/quicklog/`. Format is documented in the
+/// README; entries are delimited by a line matching exactly `## HH:mm`.
 final class StorageManager {
     static let shared = StorageManager()
 
@@ -86,9 +76,21 @@ final class StorageManager {
 
     /// Entries for a day, oldest first.
     func entries(for dayKey: String) -> [Entry] {
+        read(dayKey).entries
+    }
+
+    /// A parsed day file: everything before the first `## HH:mm` (title and any
+    /// hand-written notes) plus the entries.
+    struct DayFile {
+        var preamble: String
+        var entries: [Entry]
+    }
+
+    func read(_ dayKey: String) -> DayFile {
         guard let text = try? String(contentsOf: fileURL(for: dayKey), encoding: .utf8) else {
-            return []
+            return DayFile(preamble: "", entries: [])
         }
+        var preambleLines: [String] = []
         var entries: [Entry] = []
         var currentTime: String?
         var buffer: [String] = []
@@ -97,7 +99,10 @@ final class StorageManager {
             guard let time = currentTime else { return }
             let body = buffer.joined(separator: "\n")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            entries.append(Entry(time: time, body: body))
+            let occurrence = entries.reduce(0) { $0 + ($1.time == time ? 1 : 0) }
+            entries.append(
+                Entry(id: "\(time)#\(occurrence)#\(body)", time: time, body: body)
+            )
             buffer = []
         }
 
@@ -107,10 +112,15 @@ final class StorageManager {
                 currentTime = time
             } else if currentTime != nil {
                 buffer.append(line)
+            } else {
+                preambleLines.append(line)
             }
         }
         flush()
-        return entries
+        return DayFile(
+            preamble: preambleLines.joined(separator: "\n"),
+            entries: entries
+        )
     }
 
     // MARK: Write
@@ -139,6 +149,81 @@ final class StorageManager {
         }
         try text.write(to: url, atomically: true, encoding: .utf8)
         return key
+    }
+
+    // MARK: Edit / delete
+    //
+    // Both rewrite the day's own file in place. The file name, the `# YYYY-MM-DD`
+    // title, any hand-written preamble, and every `## HH:mm` stamp are preserved
+    // — editing an old entry never moves it to today's file.
+
+    /// Replaces the body of the entry at `index` in `dayKey`.
+    func updateEntry(dayKey: String, index: Int, body: String) throws {
+        var file = read(dayKey)
+        guard file.entries.indices.contains(index) else { throw StorageError.entryNotFound }
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            // An emptied entry is a delete.
+            try deleteEntry(dayKey: dayKey, index: index)
+            return
+        }
+        file.entries[index].body = trimmed
+        try write(file, to: dayKey)
+    }
+
+    /// Removes the entry at `index` from `dayKey`.
+    func deleteEntry(dayKey: String, index: Int) throws {
+        var file = read(dayKey)
+        guard file.entries.indices.contains(index) else { throw StorageError.entryNotFound }
+        file.entries.remove(at: index)
+
+        // Nothing left but the title we generated -> drop the file so the day
+        // stops showing up in the sidebar. Any hand-written preamble is kept.
+        if file.entries.isEmpty,
+           file.preamble.trimmingCharacters(in: .whitespacesAndNewlines) == "# \(dayKey)" {
+            try? FileManager.default.removeItem(at: fileURL(for: dayKey))
+            return
+        }
+        try write(file, to: dayKey)
+    }
+
+    /// Serialises a day file back to disk in the same shape `append` produces.
+    private func write(_ file: DayFile, to dayKey: String) throws {
+        var preamble = file.preamble.trimmingCharacters(in: .whitespacesAndNewlines)
+        if preamble.isEmpty { preamble = "# \(dayKey)" }
+
+        var text = preamble + "\n"
+        for entry in file.entries {
+            text += "\n## \(entry.time)\n\(entry.body)\n"
+        }
+        try text.write(to: fileURL(for: dayKey), atomically: true, encoding: .utf8)
+    }
+
+    enum StorageError: LocalizedError {
+        case entryNotFound
+
+        var errorDescription: String? {
+            switch self {
+            case .entryNotFound: return "Entry no longer exists — reloaded from disk."
+            }
+        }
+    }
+
+    // MARK: Raw access (undo/redo snapshots)
+
+    /// Whole-file contents, or nil if the day has no file.
+    func rawText(for dayKey: String) -> String? {
+        try? String(contentsOf: fileURL(for: dayKey), encoding: .utf8)
+    }
+
+    /// Restores a whole-file snapshot. `nil` means "the file did not exist".
+    func writeRaw(_ text: String?, to dayKey: String) {
+        let url = fileURL(for: dayKey)
+        if let text {
+            try? text.write(to: url, atomically: true, encoding: .utf8)
+        } else {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     // MARK: Helpers
@@ -183,7 +268,6 @@ final class JournalStore: ObservableObject {
 
     var todayKey: String { storage.dayKey() }
     var isViewingToday: Bool { selectedDay == todayKey }
-    var storageDirectory: URL { storage.directory }
 
     func reload() {
         var list = storage.days()
@@ -203,6 +287,7 @@ final class JournalStore: ObservableObject {
     }
 
     func select(_ key: String) {
+        cancelEdit()
         selectedDay = key
         loadSelectedDay()
     }
@@ -211,14 +296,124 @@ final class JournalStore: ObservableObject {
     func saveDraft() {
         let body = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return }
-        do {
-            let key = try storage.append(body)
+        let key = todayKey
+        mutate(key) {
+            try storage.append(body)
             draft = ""
-            lastError = nil
             selectedDay = key
-            reload()
+        }
+    }
+
+    // MARK: Undo / redo
+    //
+    // Whole-file snapshots. Cheap (a day file is a few KB), and immune to the
+    // entry parser drifting out of sync with the index-based edit API.
+
+    private struct Snapshot {
+        let dayKey: String
+        /// File contents before the change; nil = file did not exist.
+        let before: String?
+        /// File contents after the change; nil = file was removed.
+        let after: String?
+    }
+
+    private var undoStack: [Snapshot] = []
+    private var redoStack: [Snapshot] = []
+    private let undoLimit = 50
+
+    @Published var canUndo = false
+    @Published var canRedo = false
+
+    /// Runs a file mutation, recording before/after snapshots for undo.
+    private func mutate(_ dayKey: String, _ body: () throws -> Void) {
+        let before = storage.rawText(for: dayKey)
+        do {
+            try body()
+            let after = storage.rawText(for: dayKey)
+            if before != after {
+                undoStack.append(Snapshot(dayKey: dayKey, before: before, after: after))
+                if undoStack.count > undoLimit { undoStack.removeFirst() }
+                redoStack.removeAll()
+            }
+            lastError = nil
         } catch {
             lastError = error.localizedDescription
+        }
+        refreshUndoFlags()
+        reload()
+    }
+
+    func undo() {
+        guard let snap = undoStack.popLast() else { return }
+        storage.writeRaw(snap.before, to: snap.dayKey)
+        redoStack.append(snap)
+        finishTimeTravel(on: snap.dayKey)
+    }
+
+    func redo() {
+        guard let snap = redoStack.popLast() else { return }
+        storage.writeRaw(snap.after, to: snap.dayKey)
+        undoStack.append(snap)
+        finishTimeTravel(on: snap.dayKey)
+    }
+
+    private func finishTimeTravel(on dayKey: String) {
+        cancelEdit()
+        selectedDay = dayKey
+        lastError = nil
+        refreshUndoFlags()
+        reload()
+    }
+
+    private func refreshUndoFlags() {
+        canUndo = !undoStack.isEmpty
+        canRedo = !redoStack.isEmpty
+    }
+
+    // MARK: Edit / delete
+
+    /// Entry currently open in the inline editor, if any.
+    @Published var editingEntryID: String?
+    @Published var editDraft: String = ""
+
+    func isEditing(_ entry: Entry) -> Bool {
+        editingEntryID == entry.id
+    }
+
+    func beginEdit(_ entry: Entry) {
+        editingEntryID = entry.id
+        editDraft = entry.body
+        lastError = nil
+    }
+
+    func cancelEdit() {
+        editingEntryID = nil
+        editDraft = ""
+    }
+
+    /// Writes the inline editor's contents back to the entry's own day file.
+    /// An empty body deletes the entry.
+    func commitEdit() {
+        guard let id = editingEntryID,
+              let index = entries.firstIndex(where: { $0.id == id })
+        else {
+            cancelEdit()
+            return
+        }
+        let day = selectedDay
+        let body = editDraft
+        mutate(day) {
+            try storage.updateEntry(dayKey: day, index: index, body: body)
+            cancelEdit()
+        }
+    }
+
+    func delete(_ entry: Entry) {
+        guard let index = entries.firstIndex(where: { $0.id == entry.id }) else { return }
+        let day = selectedDay
+        mutate(day) {
+            try storage.deleteEntry(dayKey: day, index: index)
+            if editingEntryID == entry.id { cancelEdit() }
         }
     }
 }

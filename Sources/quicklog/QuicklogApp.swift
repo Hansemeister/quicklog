@@ -1,6 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
-import SwiftUI
+import ServiceManagement
 
 // MARK: - Entry point
 
@@ -8,12 +8,54 @@ import SwiftUI
 enum QuicklogMain {
     @MainActor
     static func main() {
+        // Only one instance may ever run — a second one would give a duplicate
+        // menu-bar icon and two processes writing the same files.
+        guard SingleInstance.acquire() else {
+            SingleInstance.askRunningInstanceToShow()
+            return
+        }
+
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
         // Accessory: no Dock icon, lives in the menu bar + hotkey only.
         app.setActivationPolicy(.accessory)
         app.run()
+    }
+}
+
+// MARK: - Single instance
+
+/// Enforced with an advisory lock on a file in the storage directory. The kernel
+/// drops the lock when the process dies, so a crash cannot leave it stuck — and
+/// unlike a bundle-identifier check it also covers running the bare binary.
+enum SingleInstance {
+    /// Sent by a second launch so the instance that owns the lock surfaces.
+    static let showNotification = Notification.Name("com.bigbrain.quicklog.show")
+
+    private static var fd: Int32 = -1
+
+    static func acquire() -> Bool {
+        let path = StorageManager.shared.directory
+            .appendingPathComponent(".instance.lock").path
+        fd = open(path, O_CREAT | O_RDWR, 0o644)
+        // Can't even open the lock file: don't block startup over it.
+        guard fd >= 0 else { return true }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            close(fd)
+            fd = -1
+            return false
+        }
+        return true
+    }
+
+    static func askRunningInstanceToShow() {
+        DistributedNotificationCenter.default().postNotificationName(
+            showNotification,
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
     }
 }
 
@@ -25,19 +67,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panelController: PanelController!
     private var hotkey: Hotkey?
     private var statusItem: NSStatusItem?
+    private var loginItem: NSMenuItem?
+    /// False when `⌘⇧Space` was already taken — surfaced in the menu bar.
+    private var hotkeyRegistered = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         panelController = PanelController(store: store)
         setupMainMenu()
-        setupStatusItem()
         registerHotkey()
+        setupStatusItem()
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(openPanel),
+            name: SingleInstance.showNotification,
+            object: nil
+        )
         panelController.show()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         panelController.saveFrame()
-        UserDefaults.standard.synchronize()
-        hotkey = nil
     }
 
     // MARK: Main menu
@@ -103,22 +152,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.panelController.toggle()
             }
         }
-        if hotkey == nil {
+        hotkeyRegistered = hotkey != nil
+        if !hotkeyRegistered {
             NSLog("quicklog: failed to register global hotkey (already taken?)")
         }
+    }
+
+    // MARK: Launch at login
+
+    @objc private func toggleLaunchAtLogin() {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+            } else {
+                try service.register()
+            }
+        } catch {
+            // Most likely cause: running the bare binary instead of the bundle,
+            // or a copy macOS won't accept (not in /Applications).
+            let alert = NSAlert()
+            alert.messageText = "Couldn't change the login item"
+            alert.informativeText =
+                "\(error.localizedDescription)\n\nRun `just install` so quicklog "
+                + "lives in /Applications, then try again."
+            alert.runModal()
+        }
+        refreshLoginItemState()
+    }
+
+    private func refreshLoginItemState() {
+        loginItem?.state = SMAppService.mainApp.status == .enabled ? .on : .off
     }
 
     // MARK: Menu bar
 
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        // A failed hotkey registration is otherwise invisible — the app just
+        // looks dead — so it changes the icon and adds an explanation.
         item.button?.image = NSImage(
-            systemSymbolName: "square.and.pencil",
+            systemSymbolName: hotkeyRegistered
+                ? "square.and.pencil"
+                : "exclamationmark.triangle",
             accessibilityDescription: "quicklog"
         )
+        item.button?.toolTip = hotkeyRegistered
+            ? "quicklog — ⌘⇧Space"
+            : "quicklog — ⌘⇧Space is taken by another app; use this menu"
+
         let menu = NSMenu()
+        if !hotkeyRegistered {
+            let warning = menu.addItem(
+                withTitle: "⌘⇧Space unavailable — taken by another app",
+                action: nil,
+                keyEquivalent: ""
+            )
+            warning.isEnabled = false
+            menu.addItem(.separator())
+        }
         menu.addItem(
-            withTitle: "Open quicklog  ⌘⇧Space",
+            withTitle: hotkeyRegistered ? "Open quicklog  ⌘⇧Space" : "Open quicklog",
             action: #selector(openPanel),
             keyEquivalent: ""
         ).target = self
@@ -127,6 +221,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(revealStorage),
             keyEquivalent: ""
         ).target = self
+        menu.addItem(.separator())
+        let login = menu.addItem(
+            withTitle: "Start at Login",
+            action: #selector(toggleLaunchAtLogin),
+            keyEquivalent: ""
+        )
+        login.target = self
+        loginItem = login
+        refreshLoginItemState()
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.menu = menu
@@ -149,15 +252,12 @@ final class Hotkey {
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
     private let action: () -> Void
-    private static var registry: [UInt32: Hotkey] = [:]
-    private static var nextID: UInt32 = 1
-
-    private let id: UInt32
+    /// Only ever one hotkey, so the Carbon callback doesn't need to work out
+    /// which one fired.
+    private static var current: Hotkey?
 
     init?(keyCode: UInt32, modifiers: UInt32, action: @escaping () -> Void) {
         self.action = action
-        self.id = Hotkey.nextID
-        Hotkey.nextID += 1
 
         var eventType = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
@@ -165,21 +265,8 @@ final class Hotkey {
         )
         let handlerStatus = InstallEventHandler(
             GetApplicationEventTarget(),
-            { _, event, _ -> OSStatus in
-                var hotKeyID = EventHotKeyID()
-                let status = GetEventParameter(
-                    event,
-                    EventParamName(kEventParamDirectObject),
-                    EventParamType(typeEventHotKeyID),
-                    nil,
-                    MemoryLayout<EventHotKeyID>.size,
-                    nil,
-                    &hotKeyID
-                )
-                guard status == noErr else { return status }
-                DispatchQueue.main.async {
-                    Hotkey.registry[hotKeyID.id]?.action()
-                }
+            { _, _, _ -> OSStatus in
+                DispatchQueue.main.async { Hotkey.current?.action() }
                 return noErr
             },
             1,
@@ -189,7 +276,7 @@ final class Hotkey {
         )
         guard handlerStatus == noErr else { return nil }
 
-        let hotKeyID = EventHotKeyID(signature: OSType(0x716C_6F67), id: id) // 'qlog'
+        let hotKeyID = EventHotKeyID(signature: OSType(0x716C_6F67), id: 1) // 'qlog'
         let registerStatus = RegisterEventHotKey(
             keyCode,
             modifiers,
@@ -202,12 +289,6 @@ final class Hotkey {
             if let eventHandler { RemoveEventHandler(eventHandler) }
             return nil
         }
-        Hotkey.registry[id] = self
-    }
-
-    deinit {
-        if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
-        if let eventHandler { RemoveEventHandler(eventHandler) }
-        Hotkey.registry[id] = nil
+        Hotkey.current = self
     }
 }

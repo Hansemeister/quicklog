@@ -77,10 +77,10 @@ is done with the two arrow buttons at the top of the window, not a shortcut.
 
 ## Undo / redo
 
-Two arrow buttons at the top of the window, left of everything else. They grey
-out when there is nothing to undo/redo, and show a text label next to them on
-hover. Covers saves, edits and deletes; 50 steps deep; a new change clears the
-redo stack. Undo jumps the sidebar to the affected day.
+Two arrow buttons at the top of the window, right of the sidebar toggle. They
+grey out when there is nothing to undo/redo, and show a text label next to them
+on hover. Covers saves, edits, deletes and checkbox resolves; 50 steps deep; a
+new change clears the redo stack. Undo jumps the sidebar to the affected day.
 
 Implemented as whole-file snapshots (`before`/`after` text per change) rather
 than per-entry diffs — a day file is a few KB, and it can't drift out of sync
@@ -92,15 +92,17 @@ with the parser. The stack is in-memory only, so it resets when the app quits.
 the end of the note, so you can type straight away. Dragging to highlight text
 for copying does not trigger edit mode — the tap gesture has a movement
 threshold. Right-click gives *Edit* and *Delete*. Hovering an entry tints its
-background to show it's clickable.
+background to show it's clickable. Clicking a checkbox resolves it instead of
+opening the editor — see *Checkboxes*.
 
-The inline editor is a plain SwiftUI `TextEditor`. It takes focus via
-`@FocusState`. The caret is moved to the end of the note on the text view
-itself (`moveCaretToEnd`) — SwiftUI parks it at offset 0 when the editor takes
-focus, and writing a `TextSelection` back loses the race with that.
-`⌘↩` saves and `esc` cancels the edit;
-`esc` is routed through `QuicklogPanel.onCancel`, so it cancels an open edit and
-only hides the panel when nothing is being edited.
+The inline editor is a plain SwiftUI `TextEditor`. `focusEditorAtEnd` finds the
+underlying `NSTextView`, makes it first responder and puts the caret at the end.
+SwiftUI's own `@FocusState` + `TextSelection` route was tried first and lost the
+race with the editor's own setup, which parks the caret at offset 0.
+
+`⌘↩` saves and `esc` cancels the edit; `esc` is routed through
+`QuicklogPanel.onCancel`, so it cancels an open edit and only hides the panel
+when nothing is being edited.
 
 There is no delete button — **clear the text in the editor and save to delete
 the entry** (the Save button relabels itself to *Delete* when the text is
@@ -120,6 +122,41 @@ unless the file has hand-written preamble text, which is kept.
 Entry identity is content-derived (`HH:mm#occurrence#body`) rather than a fresh
 UUID per parse, so surviving rows keep their identity across a reload and only
 the deleted row animates.
+
+## Checkboxes
+
+Write a note you need to come back to as a task line:
+
+```md
+- [ ] send email to X
+```
+
+It renders as an unchecked box. **Click the box to resolve it** (click again to
+reopen). The cursor turns into a pointing hand over a box. Only that line is
+rewritten to `- [x]` in the day file, boxes in the same entry resolve
+independently, and it's undoable like any other change.
+
+```sh
+just todos   # every open `- [ ]` line across all day files, with file + line
+```
+
+Plain GitHub-style markdown — no separate todo store, no new file format. Works
+with `-`, `*` and `+`, and with nesting. A box needs a space after the bullet
+(`- [ ]`, not `-[ ]`).
+
+The box can't own a click gesture of its own. The entry body's click-to-edit
+gesture is `simultaneousGesture` (so text selection still works), which means a
+child gesture would fire *as well* and open the editor on top of the toggle. So
+the row's single tap handler checks which box the cursor is over — tracked via
+`onHover` — and either resolves that box or opens the editor. Cursor pushes and
+pops go through `setHoveredBox` so they stay balanced.
+
+## Sidebar
+
+The day list collapses with the leftmost button in the header bar. SwiftUI's
+built-in split-view toggle is removed (`.toolbar(removing: .sidebarToggle)`)
+because it jumps to the detail column's edge once the sidebar is hidden; ours
+stays on the left.
 
 ## Layout ratio
 
@@ -163,12 +200,14 @@ inside an entry are left alone.
 
 - `just data` — open the folder
 - `just today` — cat today's file
+- `just todos` — list open `- [ ]` lines
 - `just nuke-data` — delete all entries (prompts)
 
 ## Markdown supported
 
-Headers `#`/`##`/`###`, bullets `-`/`*`/`+` with 2-space nesting, `**bold**`,
-`*italic*`, `` `code` ``. Preview toggle in the composer renders as you type.
+Headers `#`/`##`/`###`, bullets `-`/`*`/`+` with 2-space nesting, checkboxes
+`- [ ]`/`- [x]`, `**bold**`, `*italic*`, `` `code` ``. Preview toggle in the
+composer renders as you type.
 
 ## Manual test pass
 
@@ -184,7 +223,7 @@ Headers `#`/`##`/`###`, bullets `-`/`*`/`+` with 2-space nesting, `**bold**`,
    same `# 2026-08-01` title, same `## HH:mm` stamp, new body.
 8. Click it again → `⌘A`, delete, `⌘↩` (button reads *Delete*). The row fades and
    collapses; other entries intact.
-9. Click the undo arrow (top left) — the deleted entry is back. Redo arrow —
+9. Click the undo arrow at the top — the deleted entry is back. Redo arrow —
    gone again. Both grey out when their stack is empty, and label themselves on
    hover.
 10. Drag the handle above the composer to both extremes — it must track the
@@ -193,6 +232,13 @@ Headers `#`/`##`/`###`, bullets `-`/`*`/`+` with 2-space nesting, `**bold**`,
 11. Drag across an entry's text to highlight it, then `⌘C` — must copy without
     entering edit mode.
 12. Drag the panel to a corner, `just restart` — it reopens in the same spot.
+13. Save an entry with two boxes — `- [ ] send email to X` and `- [ ] book the
+    room`. Both render as empty boxes and `just todos` lists both. Click the
+    first box — only it ticks, greys and strikes through, and the editor must
+    *not* open. Click the text next to it — the editor opens. Undo arrow — the
+    box goes back to unticked.
+14. Click the leftmost header button — the day list collapses and the button
+    stays on the left. Click again to bring it back.
 
 ## TODO
 
@@ -209,10 +255,10 @@ Headers `#`/`##`/`###`, bullets `-`/`*`/`+` with 2-space nesting, `**bold**`,
 just test
 ```
 
-`Tests/main.swift` — 17 checks over storage: that a user's own `##` headers
+`Tests/main.swift` — 29 checks over storage: that a user's own `##` headers
 don't split an entry, that editing an old entry preserves its file name, title,
-preamble and every other stamp, the file layout, blank edit = delete, and the
-file-removal rules.
+preamble and every other stamp, the file layout, blank edit = delete, the
+file-removal rules, and per-line checkbox resolve/reopen.
 
 It's a plain executable compiled against `StorageManager.swift`, not an XCTest
 target: XCTest and swift-testing ship with Xcode, and this only needs Command
@@ -232,8 +278,8 @@ Sources/quicklog/
   PanelController.swift  # floating NSPanel + root view
   EntryView.swift        # composer, entry list, inline editor, markdown renderer
   SidebarView.swift      # day list
-  StorageManager.swift   # flat .md read/write/edit/delete + JournalStore
-Tests/main.swift         # storage + undo/redo tests (just test)
+  StorageManager.swift   # flat .md read/write/edit/delete + JournalStore + TaskLine
+Tests/main.swift         # storage + checkbox tests (just test)
 ```
 
 Sources live under `Sources/quicklog/` rather than the repo root — SwiftPM

@@ -55,6 +55,10 @@ data:
 today:
     @cat ~/Library/Application\ Support/quicklog/$(date +%F).md 2>/dev/null || echo "no entries today"
 
+# list every unresolved checkbox across all days
+todos:
+    @grep -rn -- "- \[ \]" ~/Library/Application\ Support/quicklog/*.md 2>/dev/null || echo "no open todos"
+
 # delete all journal data (asks first)
 # Stops the app first: the single-instance lock lives in that folder, and
 # deleting it under a running instance would let a second one start.

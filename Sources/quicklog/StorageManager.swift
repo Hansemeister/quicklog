@@ -247,6 +247,64 @@ final class StorageManager {
     }
 }
 
+// MARK: - Task lines
+
+/// Checkbox lines inside an entry body: `- [ ] send email to X`, resolved as
+/// `- [x] send email to X`. Plain GitHub-style markdown, so the file stays
+/// readable and editable anywhere — there is no separate todo store.
+enum TaskLine {
+    /// One checkbox. Named `Item` rather than `Task` to stay clear of Swift's
+    /// concurrency `Task`.
+    struct Item {
+        let line: Int
+        let done: Bool
+        let text: String
+    }
+
+    /// A bullet's text (`[ ] foo`) -> is it done, and the text after the box.
+    static func split(_ bulletText: String) -> (done: Bool, text: String)? {
+        let lower = bulletText.lowercased()
+        guard lower.hasPrefix("[ ]") || lower.hasPrefix("[x]") else { return nil }
+        return (lower.hasPrefix("[x]"),
+                String(bulletText.dropFirst(3)).trimmingCharacters(in: .whitespaces))
+    }
+
+    /// Every checkbox in the body, in source order. Each one resolves on its own,
+    /// so the line number is what identifies it.
+    static func items(in body: String) -> [Item] {
+        body.components(separatedBy: "\n").enumerated().compactMap { index, line in
+            guard let range = markerRange(in: line) else { return nil }
+            return Item(
+                line: index,
+                done: line[range].lowercased() == "[x]",
+                text: String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+            )
+        }
+    }
+
+    /// Flips the checkbox on one line. Indentation and bullet character are left
+    /// as the user wrote them. A line that isn't a checkbox is left alone.
+    static func setDone(in body: String, line: Int, done: Bool) -> String {
+        var lines = body.components(separatedBy: "\n")
+        guard lines.indices.contains(line),
+              let range = markerRange(in: lines[line])
+        else { return body }
+        lines[line] = lines[line].replacingCharacters(in: range, with: done ? "[x]" : "[ ]")
+        return lines.joined(separator: "\n")
+    }
+
+    /// Range of the `[ ]`/`[x]` marker, or nil if the line isn't a checkbox.
+    private static func markerRange(in line: String) -> Range<String.Index>? {
+        let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+        guard let bullet = trimmed.first, "-*+".contains(bullet) else { return nil }
+        let rest = trimmed.dropFirst().drop(while: { $0 == " " })
+        guard rest.count < trimmed.count - 1 else { return nil } // needs a space after the bullet
+        let box = rest.prefix(3).lowercased()
+        guard box == "[ ]" || box == "[x]" else { return nil }
+        return rest.startIndex..<line.index(rest.startIndex, offsetBy: 3)
+    }
+}
+
 // MARK: - Store
 
 /// Observable view-model layer over `StorageManager`.
@@ -405,6 +463,17 @@ final class JournalStore: ObservableObject {
         mutate(day) {
             try storage.updateEntry(dayKey: day, index: index, body: body)
             cancelEdit()
+        }
+    }
+
+    /// Resolves or reopens one checkbox in the entry. Writes to the entry's own
+    /// day file, and is undoable like any other change.
+    func setTaskDone(_ entry: Entry, line: Int, done: Bool) {
+        guard let index = entries.firstIndex(where: { $0.id == entry.id }) else { return }
+        let day = selectedDay
+        let body = TaskLine.setDone(in: entry.body, line: line, done: done)
+        mutate(day) {
+            try storage.updateEntry(dayKey: day, index: index, body: body)
         }
     }
 

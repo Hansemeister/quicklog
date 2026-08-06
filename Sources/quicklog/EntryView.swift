@@ -7,6 +7,9 @@ struct EntryView: View {
     @FocusState private var composerFocused: Bool
     @State private var showPreview = false
     @State private var hoveredEntryID: String?
+    /// The checkbox the cursor is currently over, if any. A click on the entry
+    /// resolves this one instead of opening the editor.
+    @State private var hoveredBox: TaskLine.Item?
 
     /// Composer height, dragged via the divider and remembered across launches.
     @AppStorage("quicklog.composerHeight") private var composerHeight: Double = 150
@@ -92,7 +95,15 @@ struct EntryView: View {
             if store.isEditing(entry) {
                 inlineEditor
             } else {
-                MarkdownText(entry.body)
+                MarkdownText(entry.body) { box, inside in
+                    // Ordering isn't guaranteed when moving between two adjacent
+                    // boxes, so only the box that claimed the cursor may clear it.
+                    if inside {
+                        setHoveredBox(box)
+                    } else if hoveredBox?.line == box.line {
+                        setHoveredBox(nil)
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -110,15 +121,26 @@ struct EntryView: View {
                 hoveredEntryID = entry.id
             } else if hoveredEntryID == entry.id {
                 hoveredEntryID = nil
+                // The cursor can leave the row without the box's own onHover
+                // firing (a deleted row, a scroll). Reset here so the pointing
+                // hand can't get stuck.
+                setHoveredBox(nil)
             }
         }
-        // Click the text to edit it. `simultaneousGesture` so the text view still
-        // gets the click for selection, and TapGesture's own movement threshold
-        // means a drag to highlight for copying does not trigger this.
+        // Click the text to edit it — or a checkbox to resolve it.
+        // `simultaneousGesture` so the text view still gets the click for
+        // selection, and TapGesture's own movement threshold means a drag to
+        // highlight for copying does not trigger this. The checkbox can't own a
+        // gesture of its own: this one is simultaneous, so it would fire too and
+        // open the editor on top of the toggle. Hover state decides instead.
         .simultaneousGesture(
             TapGesture().onEnded {
                 guard !store.isEditing(entry) else { return }
-                store.beginEdit(entry)
+                if let box = hoveredBox {
+                    store.setTaskDone(entry, line: box.line, done: !box.done)
+                } else {
+                    store.beginEdit(entry)
+                }
             }
         )
         .contextMenu {
@@ -192,6 +214,15 @@ struct EntryView: View {
             editor.setSelectedRange(NSRange(location: end, length: 0))
             editor.scrollRangeToVisible(NSRange(location: end, length: 0))
         }
+    }
+
+    /// Single funnel for the hovered checkbox so the pointing-hand cursor's
+    /// pushes and pops stay balanced — an unbalanced push leaves the wrong cursor
+    /// everywhere until the app restarts.
+    private func setHoveredBox(_ box: TaskLine.Item?) {
+        if box != nil, hoveredBox == nil { NSCursor.pointingHand.push() }
+        if box == nil, hoveredBox != nil { NSCursor.pop() }
+        hoveredBox = box
     }
 
     private static func textView(in view: NSView, holding text: String) -> NSTextView? {
@@ -316,9 +347,14 @@ struct EntryView: View {
 /// `*italic*`, and `` `code` `` are handled by Foundation's markdown parser.
 struct MarkdownText: View {
     private let blocks: [MarkdownBlock]
+    /// Called as the cursor enters/leaves a checkbox, so the entry row's tap
+    /// gesture knows whether a click means "resolve this box" or "edit the
+    /// entry". The composer preview leaves it nil and stays inert.
+    private let onHoverBox: ((TaskLine.Item, Bool) -> Void)?
 
-    init(_ text: String) {
+    init(_ text: String, onHoverBox: ((TaskLine.Item, Bool) -> Void)? = nil) {
         self.blocks = MarkdownBlock.parse(text)
+        self.onHoverBox = onHoverBox
     }
 
     var body: some View {
@@ -334,6 +370,19 @@ struct MarkdownText: View {
                         Text(bulletGlyph(indent))
                             .foregroundStyle(.secondary)
                         inline(text)
+                    }
+                    .padding(.leading, CGFloat(indent) * 16)
+                case let .task(line, indent, done, text):
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: done ? "checkmark.square" : "square")
+                            .foregroundStyle(done ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tint))
+                            .contentShape(Rectangle())
+                            .onHover { inside in
+                                onHoverBox?(TaskLine.Item(line: line, done: done, text: text), inside)
+                            }
+                        inline(text)
+                            .foregroundStyle(done ? .secondary : .primary)
+                            .strikethrough(done, color: .secondary)
                     }
                     .padding(.leading, CGFloat(indent) * 16)
                 case let .paragraph(text):
@@ -376,12 +425,15 @@ struct MarkdownText: View {
 enum MarkdownBlock {
     case heading(level: Int, text: String)
     case bullet(indent: Int, text: String)
+    /// `- [ ]` / `- [x]` — a bullet that can be resolved. `line` is its line
+    /// number in the entry body, which is how a click identifies it.
+    case task(line: Int, indent: Int, done: Bool, text: String)
     case paragraph(String)
     case blank
 
     static func parse(_ text: String) -> [MarkdownBlock] {
         var blocks: [MarkdownBlock] = []
-        for rawLine in text.components(separatedBy: "\n") {
+        for (lineNumber, rawLine) in text.components(separatedBy: "\n").enumerated() {
             let line = rawLine.replacingOccurrences(of: "\t", with: "  ")
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
@@ -399,7 +451,11 @@ enum MarkdownBlock {
 
             if let marker = bulletMarker(trimmed) {
                 let leading = line.prefix(while: { $0 == " " }).count
-                blocks.append(.bullet(indent: leading / 2, text: marker))
+                if let (done, text) = TaskLine.split(marker) {
+                    blocks.append(.task(line: lineNumber, indent: leading / 2, done: done, text: text))
+                } else {
+                    blocks.append(.bullet(indent: leading / 2, text: marker))
+                }
                 continue
             }
 

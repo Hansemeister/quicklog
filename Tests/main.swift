@@ -141,6 +141,48 @@ func testDeleteLastEntryRemovesGeneratedFileOnly() {
     }
 }
 
+// MARK: - Checkboxes
+
+func testTaskLines() {
+    let body = """
+    - [ ] send email to X
+      - [x] already done
+    - not a task
+    -[ ] no space after the bullet
+    * [ ] star bullet
+    """
+    let boxes = TaskLine.items(in: body)
+    expect(boxes.count, 3, "finds the three real checkboxes")
+    expect(boxes.map(\.line), [0, 1, 4], "reports source line numbers")
+    expect(boxes.map(\.done), [false, true, false], "reads each state")
+    expect(boxes.map(\.text), ["send email to X", "already done", "star bullet"],
+           "strips the box and indentation from the label")
+    check(TaskLine.items(in: "- plain bullet").isEmpty, "plain bullets aren't checkboxes")
+
+    expect(TaskLine.setDone(in: body, line: 0, done: true), """
+    - [x] send email to X
+      - [x] already done
+    - not a task
+    -[ ] no space after the bullet
+    * [ ] star bullet
+    """, "resolving one box leaves the others, the indentation and non-tasks alone")
+
+    expect(TaskLine.setDone(in: body, line: 1, done: false), """
+    - [ ] send email to X
+      - [ ] already done
+    - not a task
+    -[ ] no space after the bullet
+    * [ ] star bullet
+    """, "reopening one box keeps its indentation")
+
+    expect(TaskLine.setDone(in: body, line: 2, done: true), body, "a non-checkbox line is untouched")
+    expect(TaskLine.setDone(in: body, line: 99, done: true), body, "out-of-range line is untouched")
+
+    expect(TaskLine.split("[ ] thing")?.text, "thing", "split strips the box")
+    check(TaskLine.split("[x] thing")?.done == true, "split reads the state")
+    check(TaskLine.split("plain") == nil, "split rejects non-tasks")
+}
+
 // MARK: - Run
 
 testAppendCreatesTitledFile()
@@ -148,6 +190,7 @@ testUserHeadersInBodyAreNotDelimiters()
 testEditMiddleEntryPreservesEverything()
 testEmptyEditDeletesEntry()
 testDeleteLastEntryRemovesGeneratedFileOnly()
+testTaskLines()
 
 if failures == 0 {
     print("ok — \(checks) checks passed")

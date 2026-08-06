@@ -7,7 +7,6 @@ struct EntryView: View {
     @FocusState private var composerFocused: Bool
     @State private var showPreview = false
     @State private var hoveredEntryID: String?
-    @FocusState private var editorFocused: Bool
 
     /// Composer height, dragged via the divider and remembered across launches.
     @AppStorage("quicklog.composerHeight") private var composerHeight: Double = 150
@@ -144,7 +143,6 @@ struct EntryView: View {
             TextEditor(text: $store.editDraft)
                 .font(.system(.body, design: .monospaced))
                 .scrollContentBackground(.hidden)
-                .focused($editorFocused)
                 .frame(minHeight: 90, maxHeight: 280)
                 .padding(2)
                 .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
@@ -152,14 +150,7 @@ struct EntryView: View {
                     RoundedRectangle(cornerRadius: 4)
                         .stroke(Color.secondary.opacity(0.3))
                 )
-                .onAppear { editorFocused = true }
-                .onChange(of: editorFocused) { _, focused in
-                    // SwiftUI parks the caret at offset 0 when the editor takes
-                    // focus, and writing a TextSelection back loses the race
-                    // with it. Move the caret on the text view itself, once
-                    // focus has actually landed.
-                    if focused { DispatchQueue.main.async { moveCaretToEnd() } }
-                }
+                .onAppear { focusEditorAtEnd() }
             HStack(spacing: 8) {
                 Text("Clear the text to delete this entry.")
                     .font(.caption2)
@@ -178,11 +169,37 @@ struct EntryView: View {
 
     /// Puts the caret at the end of whichever text view currently has focus —
     /// the inline editor, when this runs.
-    private func moveCaretToEnd() {
-        guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView else { return }
-        let end = (editor.string as NSString).length
-        editor.setSelectedRange(NSRange(location: end, length: 0))
-        editor.scrollRangeToVisible(NSRange(location: end, length: 0))
+    ///
+    /// Done on the text view rather than through `@FocusState` +
+    /// `TextSelection`: SwiftUI parks the caret at offset 0 when the editor
+    /// takes focus, and both of those lose the race with it.
+    ///
+    /// The editor is identified by its contents — there are two text views in
+    /// the panel (this one and the composer) and view order isn't guaranteed,
+    /// but only this one holds `editDraft`. It may not be in the hierarchy on
+    /// the first pass, hence the retries.
+    private func focusEditorAtEnd(attempt: Int = 0) {
+        DispatchQueue.main.async {
+            guard let window = NSApp.windows.first(where: { $0 is QuicklogPanel }),
+                  let root = window.contentView,
+                  let editor = Self.textView(in: root, holding: store.editDraft)
+            else {
+                if attempt < 5 { focusEditorAtEnd(attempt: attempt + 1) }
+                return
+            }
+            window.makeFirstResponder(editor)
+            let end = (editor.string as NSString).length
+            editor.setSelectedRange(NSRange(location: end, length: 0))
+            editor.scrollRangeToVisible(NSRange(location: end, length: 0))
+        }
+    }
+
+    private static func textView(in view: NSView, holding text: String) -> NSTextView? {
+        if let editor = view as? NSTextView, editor.string == text { return editor }
+        for sub in view.subviews {
+            if let found = textView(in: sub, holding: text) { return found }
+        }
+        return nil
     }
 
     // MARK: Resizable split

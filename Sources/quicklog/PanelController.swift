@@ -123,14 +123,19 @@ final class PanelController: NSObject, NSWindowDelegate {
 struct RootView: View {
     @ObservedObject var store: JournalStore
     @State private var hoverHint: String?
+    @State private var columns: NavigationSplitViewVisibility = .all
 
     var body: some View {
         VStack(spacing: 0) {
             headerBar
             Divider()
-            NavigationSplitView {
+            NavigationSplitView(columnVisibility: $columns) {
                 SidebarView(store: store)
                     .navigationSplitViewColumnWidth(min: 170, ideal: 200, max: 280)
+                    // SwiftUI's own toggle jumps to the detail column's edge
+                    // once the sidebar is collapsed. Ours lives in the header
+                    // bar and stays put.
+                    .toolbar(removing: .sidebarToggle)
             } detail: {
                 EntryView(store: store)
             }
@@ -143,6 +148,13 @@ struct RootView: View {
     /// journal was invisible.
     private var headerBar: some View {
         HStack(spacing: 4) {
+            headerButton(
+                systemName: "sidebar.leading",
+                hint: columns == .detailOnly ? "Show day list" : "Hide day list",
+                enabled: true,
+                action: { withAnimation { columns = columns == .detailOnly ? .all : .detailOnly } }
+            )
+            Divider().frame(height: 16).padding(.horizontal, 2)
             headerButton(
                 systemName: "arrow.uturn.backward",
                 hint: "Undo last change",

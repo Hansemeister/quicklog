@@ -1,13 +1,22 @@
 # quicklog
 
-macOS journaling overlay. Global hotkey → floating panel → type → `⌘↩` appends a
-timestamped entry to today's markdown file.
+A journal you can reach without leaving what you're doing. Hit `⌘⇧Space`
+anywhere, type the thought, `⌘↩`, `esc`. The panel floats above the app you were
+in — no window switching, no Dock icon, no launch wait.
+
+Entries land in plain markdown files you own, one per day:
+`~/Library/Application Support/quicklog/YYYY-MM-DD.md`. Readable and greppable
+without this app; no database, no sync, no account.
+
+Built for capture speed first, review second: past days are browsable and
+editable in the same panel, and a note can carry checkboxes for things to come
+back to.
 
 ## Requirements
 
 - macOS 14+
 - Xcode Command Line Tools (`swift`)
-- [`just`](https://github.com/casey/just) (optional — see *Without just* below)
+- [`just`](https://github.com/casey/just) (optional — see *Without just*)
 
 No third-party dependencies. SwiftUI + AppKit + Carbon only.
 
@@ -22,32 +31,28 @@ just install   # copy to /Applications
 just test      # run storage tests
 ```
 
-The app has no Dock icon (`LSUIElement`). It lives in the menu bar (pencil icon)
-and on the hotkey.
+No Dock icon (`LSUIElement`) — the app lives in the menu bar (pencil icon) and on
+the hotkey.
 
-**Only one instance can run.** Launching a second one makes the running instance
-show its panel, then exits. Enforced with an advisory `flock` on
-`~/Library/Application Support/quicklog/.instance.lock` — the kernel drops it
-when the process dies, so a crash can't leave it stuck, and it works for both
-`just run` (bare binary) and `just start` (bundle).
+Only one instance runs at a time. Launching a second makes the running one show
+its panel, then exits.
 
 ### Start at login
 
-Menu-bar icon → **Start at Login** (a checkmark shows the current state). Uses
-`SMAppService.mainApp`, so macOS registers the bundle *at its current path*:
+Menu-bar icon → **Start at Login**. macOS registers the bundle *at its current
+path*, so install it first:
 
 ```sh
 just install   # → /Applications/quicklog.app, then enable it from there
 ```
 
-Enabling it from `.build/quicklog.app` works but breaks on `just clean`. If
-macOS refuses the registration, an alert says so instead of failing silently.
+Enabling from `.build/quicklog.app` works but breaks on `just clean`.
 
 ### If the hotkey doesn't work
 
-`⌘⇧Space` can already be taken (Spotlight, Alfred, input-source switching). When
-registration fails the menu-bar icon turns into a warning triangle and the menu
-says so — the app still works, open it from that menu. Change the combination in
+`⌘⇧Space` may already be taken (Spotlight, Alfred, input-source switching). The
+menu-bar icon turns into a warning triangle and the menu says so; the app still
+works from that menu. Change the combination in
 `Sources/quicklog/QuicklogApp.swift` → `registerHotkey()`.
 
 ### Without just
@@ -65,63 +70,61 @@ cp Resources/Info.plist .build/quicklog.app/Contents/Info.plist
 | Key | Action |
 | --- | --- |
 | `⌘⇧Space` | toggle panel (global) |
-| `⌘↩` | save entry |
+| `⌘↩` | save — the composer's draft, or the entry being edited |
+| `↑` `↓` | at the top/bottom of a text box: step to the entry above/below |
+| `esc` | cancel the edit, or hide the panel when not editing |
+| `⌘W` | hide panel |
 | `⌘A` `⌘C` `⌘X` `⌘V` `⌘Z` | select all / copy / cut / paste / undo (text) |
-| `esc` or `⌘W` | hide panel |
 | `⌘Q` | quit |
 
-While editing an entry: `⌘↩` saves, the *Cancel* button discards.
+`⌘↩` is a *Save Entry* item in the app menu, so it fires regardless of which text
+box has focus. `⌘Z` is the text field's own undo — undoing an *entry* change uses
+the arrow buttons in the header.
 
-`⌘Z` is the text field's own undo. Undoing an *entry* change (save/edit/delete)
-is done with the two arrow buttons at the top of the window, not a shortcut.
+## Writing
 
-## Undo / redo
+The composer sits below the entry list, on today only. Type markdown, toggle
+*Preview* to see it rendered, `⌘↩` to save. The entry appears above with a
+`HH:mm` stamp and the composer clears.
 
-Two arrow buttons at the top of the window, right of the sidebar toggle. They
-grey out when there is nothing to undo/redo, and show a text label next to them
-on hover. Covers saves, edits, deletes and checkbox resolves; 50 steps deep; a
-new change clears the redo stack. Undo jumps the sidebar to the affected day.
+Drag the handle above the composer to change the split. The height is remembered
+across launches; neither pane can collapse (composer ≥110 pt, list ≥120 pt).
 
-Implemented as whole-file snapshots (`before`/`after` text per change) rather
-than per-entry diffs — a day file is a few KB, and it can't drift out of sync
-with the parser. The stack is in-memory only, so it resets when the app quits.
+## Reviewing and editing
 
-## Editing and deleting
+**Click an entry's text to edit it in place.** The caret lands at the end of the
+note. Dragging to highlight text for copying doesn't trigger edit mode.
+Right-click gives *Edit* and *Delete*.
 
-**Click an entry's text to edit it.** The editor opens focused with the caret at
-the end of the note, so you can type straight away. Dragging to highlight text
-for copying does not trigger edit mode — the tap gesture has a movement
-threshold. Right-click gives *Edit* and *Delete*. Hovering an entry tints its
-background to show it's clickable. Clicking a checkbox resolves it instead of
-opening the editor — see *Checkboxes*.
+`⌘↩` saves, `esc` cancels. After finishing with an entry the caret returns to the
+composer, ready for the next note.
 
-The inline editor is a plain SwiftUI `TextEditor`. `focusEditorAtEnd` finds the
-underlying `NSTextView`, makes it first responder and puts the caret at the end.
-SwiftUI's own `@FocusState` + `TextSelection` route was tried first and lost the
-race with the editor's own setup, which parks the caret at offset 0.
+**Arrow keys step between notes.** From the composer, `↑` on the first line opens
+the last entry with the caret at its end; `↑` again walks up its lines, then into
+the entry above. `↓` mirrors it, and past the last entry returns to the composer.
+Stepping away from an entry you changed saves it; an untouched one just closes.
+The list scrolls to whatever opens.
 
-`⌘↩` saves and `esc` cancels the edit; `esc` is routed through
-`QuicklogPanel.onCancel`, so it cancels an open edit and only hides the panel
-when nothing is being edited.
+There is no delete button — **clear the text and save** (the Save button relabels
+itself to *Delete*). Deleted rows fade and collapse out of the list.
 
-There is no delete button — **clear the text in the editor and save to delete
-the entry** (the Save button relabels itself to *Delete* when the text is
-empty). Deleted rows fade and collapse out of the list.
-
-Edits rewrite **that entry's own day file** in place:
+Edits rewrite that entry's **own day file** in place:
 
 - the file keeps its `YYYY-MM-DD.md` name — an edited old entry never moves to
   today's file
-- the `# YYYY-MM-DD` title, any hand-written preamble, and every other entry's
+- the `# YYYY-MM-DD` title, any hand-written preamble and every other entry's
   `## HH:mm` stamp are preserved
 - the edited entry keeps its original timestamp
 
-Deleting the last entry removes the file so the day drops out of the sidebar —
+Deleting the last entry removes the file, so the day drops out of the sidebar —
 unless the file has hand-written preamble text, which is kept.
 
-Entry identity is content-derived (`HH:mm#occurrence#body`) rather than a fresh
-UUID per parse, so surviving rows keep their identity across a reload and only
-the deleted row animates.
+## Undo / redo
+
+Two arrow buttons in the header, right of the sidebar toggle. Covers saves,
+edits, deletes and checkbox resolves; 50 steps deep; a new change clears the redo
+stack; undo jumps the sidebar to the affected day. In-memory only — quitting
+clears it.
 
 ## Checkboxes
 
@@ -131,57 +134,32 @@ Write a note you need to come back to as a task line:
 - [ ] send email to X
 ```
 
-It renders as an unchecked box. **Click the box to resolve it** (click again to
-reopen). The cursor turns into a pointing hand over a box. Only that line is
-rewritten to `- [x]` in the day file, boxes in the same entry resolve
-independently, and it's undoable like any other change.
+**Click the box to resolve it**, click again to reopen. Only that line is
+rewritten to `- [x]`, boxes in the same entry resolve independently, and it's
+undoable like any other change.
 
 ```sh
 just todos   # every open `- [ ]` line across all day files, with file + line
 ```
 
-Plain GitHub-style markdown — no separate todo store, no new file format. Works
-with `-`, `*` and `+`, and with nesting. Both shorthands are accepted as
-unchecked: `- []` (nothing in the box) and `-[]` (no space after the bullet).
-Clicking one normalises it to `- [x]`/`- [ ]`, filling in whatever was missing.
-
-Dropping the space after the bullet is only allowed before a box, so `-5 degrees`
-and `-word` still render as plain text rather than turning into bullets.
-
-The box can't own a click gesture of its own. The entry body's click-to-edit
-gesture is `simultaneousGesture` (so text selection still works), which means a
-child gesture would fire *as well* and open the editor on top of the toggle. So
-the row's single tap handler checks which box the cursor is over — tracked via
-`onHover` — and either resolves that box or opens the editor. Cursor pushes and
-pops go through `setHoveredBox` so they stay balanced.
+Plain GitHub-style markdown — no separate todo store. Works with `-`, `*` and
+`+`, and with nesting. Two shorthands are accepted as unchecked and normalised on
+the first click: `- []` (nothing in the box) and `-[]` (no space after the
+bullet). Dropping the space is only allowed before a box, so `-5 degrees` and
+`-word` stay plain text.
 
 ## Sidebar
 
-The day list collapses with the leftmost button in the header bar. SwiftUI's
-built-in split-view toggle is removed (`.toolbar(removing: .sidebarToggle)`)
-because it jumps to the detail column's edge once the sidebar is hidden; ours
-stays on the left.
+Day list, collapsible with the leftmost header button. Today is labelled *Today*.
+Files dropped into the data folder by hand show up on the next open.
 
-## Layout ratio
+## Window
 
-Drag the handle between the entry list and the composer to change the split.
-The height is remembered across launches (`quicklog.composerHeight` in
-`UserDefaults`).
-
-Neither pane can collapse: the composer stays ≥110 pt and the entry list ≥120 pt,
-clamped against the window's actual height — so the handle is always reachable,
-and shrinking the window can't strand it off-screen.
-
-## Window position
-
-The panel remembers its frame (position + size) across launches, per screen
-layout. Stored in `UserDefaults` under `quicklog.panelFrame`; if the saved frame
-lands on a screen that is no longer attached, the panel re-centres.
-
-Reset it:
+The panel remembers its position and size across launches, per screen layout. If
+the saved frame lands on a screen that's gone, it re-centres.
 
 ```sh
-defaults delete com.bigbrain.quicklog quicklog.panelFrame
+defaults delete com.bigbrain.quicklog quicklog.panelFrame   # reset
 ```
 
 ## Storage
@@ -197,10 +175,11 @@ first entry, **markdown** allowed
 ## 15:01
 - bullet
   - nested
+- [x] resolved task
 ```
 
-Entries are split on lines matching exactly `## HH:mm`. Your own `##` headers
-inside an entry are left alone.
+Entries split on lines matching exactly `## HH:mm`. Your own `##` headers inside
+an entry are left alone.
 
 - `just data` — open the folder
 - `just today` — cat today's file
@@ -210,8 +189,7 @@ inside an entry are left alone.
 ## Markdown supported
 
 Headers `#`/`##`/`###`, bullets `-`/`*`/`+` with 2-space nesting, checkboxes
-`- [ ]`/`- [x]`, `**bold**`, `*italic*`, `` `code` ``. Preview toggle in the
-composer renders as you type.
+`- [ ]`/`- [x]`, `**bold**`, `*italic*`, `` `code` ``.
 
 ## Manual test pass
 
@@ -220,38 +198,29 @@ composer renders as you type.
 3. `⌘↩` — entry appears above with a `HH:mm` stamp, composer clears.
 4. `just today` in another terminal — the markdown is on disk.
 5. `esc` hides. `⌘⇧Space` from another app brings it back on top, focused.
-6. Sidebar: today is labelled *Today*. Add `~/Library/Application Support/quicklog/2026-08-01.md`
-   by hand, reopen the panel — that day is listed.
-7. Click that old entry's text — the editor opens with the caret at the end and
-   the keyboard already focused. Type, then `⌘↩`. `cat` the file: same file name,
-   same `# 2026-08-01` title, same `## HH:mm` stamp, new body.
+6. Add `~/Library/Application Support/quicklog/2026-08-01.md` by hand, reopen the
+   panel — that day is in the sidebar.
+7. Click that old entry's text — editor opens, caret at the end, keyboard
+   focused. Type, `⌘↩`. `cat` the file: same file name, same `# 2026-08-01`
+   title, same `## HH:mm` stamp, new body. Caret is back in the composer.
 8. Click it again → `⌘A`, delete, `⌘↩` (button reads *Delete*). The row fades and
    collapses; other entries intact.
-9. Click the undo arrow at the top — the deleted entry is back. Redo arrow —
-   gone again. Both grey out when their stack is empty, and label themselves on
-   hover.
-10. Drag the handle above the composer to both extremes — it must track the
-    cursor without vibrating, and neither pane may collapse. `just restart` — the
-    split is remembered.
-11. Drag across an entry's text to highlight it, then `⌘C` — must copy without
-    entering edit mode.
-12. Drag the panel to a corner, `just restart` — it reopens in the same spot.
-13. Save an entry with two boxes — `- [ ] send email to X` and `- [ ] book the
-    room`. Both render as empty boxes and `just todos` lists both. Click the
-    first box — only it ticks, greys and strikes through, and the editor must
-    *not* open. Click the text next to it — the editor opens. Undo arrow — the
-    box goes back to unticked.
-14. Click the leftmost header button — the day list collapses and the button
-    stays on the left. Click again to bring it back.
-
-## TODO
-
-- Week/month grouping in the sidebar.
-- Search.
-- Configurable hotkey in-app (hardcoded to `⌘⇧Space` today).
-- Draft is lost if the app quits before `⌘↩` — no draft persistence.
-- Undo history is in-memory; quitting clears it.
-- New entries always go to today; you can't back-date an entry to a past day.
+9. Undo arrow — the entry is back. Redo — gone again. Both grey out on an empty
+   stack.
+10. Empty composer, `↑` — the last entry opens with the caret at its end. `↑`
+    up through it and into the one above. `↓` back down and out to the composer.
+    A long wrapped line must move the caret line by line before stepping away.
+11. `↑` into an entry, type a word, `↑` again — the change is saved.
+12. Drag the handle above the composer to both extremes — tracks the cursor
+    without vibrating, neither pane collapses. `just restart` — split remembered.
+13. Drag across an entry's text to highlight, `⌘C` — copies without entering edit
+    mode.
+14. Drag the panel to a corner, `just restart` — reopens in the same spot.
+15. Save an entry with two boxes. Click the first — only it ticks, and the editor
+    must *not* open. Click the text next to it — the editor opens. Undo — back to
+    unticked.
+16. Click the leftmost header button — the day list collapses, the button stays
+    on the left. Click again to restore.
 
 ## Tests
 
@@ -259,17 +228,17 @@ composer renders as you type.
 just test
 ```
 
-`Tests/main.swift` — 44 checks over storage: that a user's own `##` headers
-don't split an entry, that editing an old entry preserves its file name, title,
-preamble and every other stamp, the file layout, blank edit = delete, the
-file-removal rules, and per-line checkbox resolve/reopen.
+`Tests/main.swift` — 44 checks over storage: `##` headers inside an entry don't
+split it, editing an old entry preserves file name/title/preamble/stamps, the
+file layout, blank edit = delete, file-removal rules, per-line checkbox
+resolve/reopen and both box shorthands.
 
-It's a plain executable compiled against `StorageManager.swift`, not an XCTest
-target: XCTest and swift-testing ship with Xcode, and this only needs Command
-Line Tools. Exits non-zero on failure.
+A plain executable compiled against `StorageManager.swift`, not an XCTest target
+— XCTest ships with Xcode and this builds on Command Line Tools alone. Exits
+non-zero on failure.
 
-UI behaviour (panel, hotkey, caret, drag) isn't covered — see the manual pass
-above.
+UI behaviour (panel, hotkey, caret, arrow navigation, drag) isn't covered — see
+the manual pass.
 
 ## Layout
 
@@ -278,7 +247,7 @@ Package.swift
 Justfile
 Resources/Info.plist
 Sources/quicklog/
-  QuicklogApp.swift      # entry point, single-instance lock, hotkey, menu bar
+  QuicklogApp.swift      # entry point, single-instance lock, hotkey, menus
   PanelController.swift  # floating NSPanel + root view
   EntryView.swift        # composer, entry list, inline editor, markdown renderer
   SidebarView.swift      # day list
@@ -286,5 +255,11 @@ Sources/quicklog/
 Tests/main.swift         # storage + checkbox tests (just test)
 ```
 
-Sources live under `Sources/quicklog/` rather than the repo root — SwiftPM
-requires it.
+## TODO
+
+- Week/month grouping in the sidebar.
+- Search.
+- Configurable hotkey in-app (hardcoded to `⌘⇧Space`).
+- Draft is lost if the app quits before `⌘↩` — no draft persistence.
+- Undo history is in-memory; quitting clears it.
+- New entries always go to today; no back-dating.

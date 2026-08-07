@@ -101,6 +101,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
         appMenu.addItem(
+            withTitle: "Save Entry",
+            action: #selector(saveEntry),
+            keyEquivalent: "\r"
+        ).target = self
+        appMenu.addItem(.separator())
+        appMenu.addItem(
             withTitle: "Hide quicklog",
             action: #selector(hidePanel),
             keyEquivalent: "w"
@@ -141,6 +147,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func hidePanel() {
         panelController.hide()
+    }
+
+    /// ⌘↩ belongs to the menu rather than the Save buttons: the composer and the
+    /// inline editor both have one, two SwiftUI buttons claiming the same
+    /// shortcut makes which fires arbitrary, and swapping the shortcut between
+    /// them as editing starts sends the hosting view into a layout loop.
+    @objc private func saveEntry() {
+        MainActor.assumeIsolated {
+            guard panelController.isVisible else { return }
+            if store.editingEntryID != nil {
+                store.commitEdit()
+            } else {
+                store.saveDraft()
+            }
+        }
     }
 
     // MARK: Global hotkey — ⌘⇧Space

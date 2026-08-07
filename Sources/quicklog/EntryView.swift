@@ -37,6 +37,11 @@ struct EntryView: View {
             }
         }
         .navigationTitle(store.selectedDay)
+        // Finishing with an entry — saved, deleted or cancelled — hands the
+        // keyboard back to the composer so the next note can just be typed.
+        .onChange(of: store.editingEntryID) { _, editing in
+            if editing == nil { composerFocused = true }
+        }
     }
 
     /// Keeps the composer between its own minimum and whatever leaves the entry
@@ -181,7 +186,6 @@ struct EntryView: View {
                 Button("Cancel") { store.cancelEdit() }
                 Button(store.editDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                        ? "Delete" : "Save") { store.commitEdit() }
-                    .keyboardShortcut(.return, modifiers: .command)
                     .buttonStyle(.borderedProminent)
             }
         }
@@ -309,7 +313,6 @@ struct EntryView: View {
                     .controlSize(.mini)
                     .font(.caption)
                 Button("Save") { store.saveDraft() }
-                    .keyboardShortcut(.return, modifiers: .command)
                     .disabled(store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .padding(.horizontal, 14)

@@ -491,6 +491,56 @@ final class JournalStore: ObservableObject {
         }
     }
 
+    /// Closes the editor, saving first if the text was changed — so stepping away
+    /// with the arrow keys can't lose typing, and an untouched entry isn't
+    /// rewritten just for having been visited.
+    func endEdit() {
+        if editDraft == entries.first(where: { $0.id == editingEntryID })?.body {
+            cancelEdit()
+        } else {
+            commitEdit()
+        }
+    }
+
+    /// Opens the entry above the one being edited — or the last entry, when
+    /// coming from the composer. False means there is nothing above, so the
+    /// caret should stay where it is.
+    func editEntryAbove() -> Bool {
+        guard let current = editingIndex else {
+            guard let last = entries.last else { return false }
+            beginEdit(last)
+            return true
+        }
+        guard current > 0 else { return false }
+        return moveEdit(to: entries[current - 1])
+    }
+
+    /// Mirror of `editEntryAbove`. Past the last entry it returns to the
+    /// composer; from the composer there is nowhere to go.
+    func editEntryBelow() -> Bool {
+        guard let current = editingIndex else { return false }
+        guard current + 1 < entries.count else {
+            endEdit()
+            return true
+        }
+        return moveEdit(to: entries[current + 1])
+    }
+
+    private var editingIndex: Int? {
+        guard let id = editingEntryID else { return nil }
+        return entries.firstIndex(where: { $0.id == id })
+    }
+
+    /// Closing the editor may rewrite the day file and shift indices, so the
+    /// destination is re-found by id afterwards.
+    private func moveEdit(to target: Entry) -> Bool {
+        let id = target.id
+        endEdit()
+        guard let entry = entries.first(where: { $0.id == id }) else { return false }
+        beginEdit(entry)
+        return true
+    }
+
     /// Resolves or reopens one checkbox in the entry. Writes to the entry's own
     /// day file, and is undoable like any other change.
     func setTaskDone(_ entry: Entry, line: Int, done: Bool) {

@@ -10,6 +10,10 @@ struct EntryView: View {
     /// The checkbox the cursor is currently over, if any. A click on the entry
     /// resolves this one instead of opening the editor.
     @State private var hoveredBox: TaskLine.Item?
+    /// Arrow-key navigation: the monitor's token, and which end of the next
+    /// editor the caret belongs at — top when arriving from above.
+    @State private var keyMonitor: Any?
+    @State private var arrivingFromAbove = false
 
     /// Composer height, dragged via the divider and remembered across launches.
     @AppStorage("quicklog.composerHeight") private var composerHeight: Double = 150
@@ -42,6 +46,44 @@ struct EntryView: View {
         .onChange(of: store.editingEntryID) { _, editing in
             if editing == nil { composerFocused = true }
         }
+        .onAppear {
+            guard keyMonitor == nil else { return }
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                handleArrow(event) ? nil : event
+            }
+        }
+        .onDisappear {
+            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+            keyMonitor = nil
+        }
+    }
+
+    /// ↑/↓ at the edge of a text view step between the composer and the entries
+    /// above it, so a run of notes can be reviewed without the mouse. Returns
+    /// true when the event was handled and should not travel further.
+    ///
+    /// A local monitor rather than a custom `NSTextView`: `TextEditor` exposes no
+    /// key handling, and replacing it would mean owning the text system.
+    private func handleArrow(_ event: NSEvent) -> Bool {
+        let up: UInt16 = 126
+        // Arrow keys always carry `.function` and `.numericPad`, so only the
+        // modifiers a person can hold down disqualify the event.
+        let held: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+        guard event.keyCode == up || event.keyCode == 125,
+              event.modifierFlags.intersection(held).isEmpty,
+              let window = event.window as? QuicklogPanel,
+              let editor = window.firstResponder as? NSTextView
+        else { return false }
+
+        // Let the text view move the caret first: it knows where wrapped lines
+        // break, and a caret that then hasn't moved is what "already at the
+        // edge" means. Either way the move is done, so the event is spent.
+        let before = editor.selectedRange().location
+        if event.keyCode == up { editor.moveUp(nil) } else { editor.moveDown(nil) }
+        guard editor.selectedRange().location == before else { return true }
+
+        arrivingFromAbove = event.keyCode != up
+        return event.keyCode == up ? store.editEntryAbove() : store.editEntryBelow()
     }
 
     /// Keeps the composer between its own minimum and whatever leaves the entry
@@ -79,6 +121,10 @@ struct EntryView: View {
             }
             .onChange(of: store.selectedDay) { _, _ in
                 proxy.scrollTo(bottomAnchor, anchor: .bottom)
+            }
+            // Arrow-key navigation can open an entry that's scrolled out of view.
+            .onChange(of: store.editingEntryID) { _, editing in
+                if let editing { proxy.scrollTo(editing, anchor: .center) }
             }
         }
     }
@@ -144,12 +190,12 @@ struct EntryView: View {
                 if let box = hoveredBox {
                     store.setTaskDone(entry, line: box.line, done: !box.done)
                 } else {
-                    store.beginEdit(entry)
+                    edit(entry)
                 }
             }
         )
         .contextMenu {
-            Button("Edit") { store.beginEdit(entry) }
+            Button("Edit") { edit(entry) }
             Button("Delete", role: .destructive) { store.delete(entry) }
         }
         // Fade + collapse on delete — the macOS convention for a row leaving a
@@ -177,7 +223,7 @@ struct EntryView: View {
                     RoundedRectangle(cornerRadius: 4)
                         .stroke(Color.secondary.opacity(0.3))
                 )
-                .onAppear { focusEditorAtEnd() }
+                .onAppear { focusEditor(atTop: arrivingFromAbove) }
             HStack(spacing: 8) {
                 Text("Clear the text to delete this entry.")
                     .font(.caption2)
@@ -193,8 +239,15 @@ struct EntryView: View {
 
     private var bottomAnchor: String { "bottom" }
 
-    /// Puts the caret at the end of whichever text view currently has focus —
-    /// the inline editor, when this runs.
+    /// Opening an entry by mouse puts the caret at its end, wherever the last
+    /// arrow-key navigation happened to leave the direction.
+    private func edit(_ entry: Entry) {
+        arrivingFromAbove = false
+        store.beginEdit(entry)
+    }
+
+    /// Focuses the inline editor and parks the caret at one end of it — the end
+    /// it was entered from, so ↑/↓ carry on in the same direction.
     ///
     /// Done on the text view rather than through `@FocusState` +
     /// `TextSelection`: SwiftUI parks the caret at offset 0 when the editor
@@ -204,19 +257,19 @@ struct EntryView: View {
     /// the panel (this one and the composer) and view order isn't guaranteed,
     /// but only this one holds `editDraft`. It may not be in the hierarchy on
     /// the first pass, hence the retries.
-    private func focusEditorAtEnd(attempt: Int = 0) {
+    private func focusEditor(atTop: Bool, attempt: Int = 0) {
         DispatchQueue.main.async {
             guard let window = NSApp.windows.first(where: { $0 is QuicklogPanel }),
                   let root = window.contentView,
                   let editor = Self.textView(in: root, holding: store.editDraft)
             else {
-                if attempt < 5 { focusEditorAtEnd(attempt: attempt + 1) }
+                if attempt < 5 { focusEditor(atTop: atTop, attempt: attempt + 1) }
                 return
             }
             window.makeFirstResponder(editor)
-            let end = (editor.string as NSString).length
-            editor.setSelectedRange(NSRange(location: end, length: 0))
-            editor.scrollRangeToVisible(NSRange(location: end, length: 0))
+            let caret = atTop ? 0 : (editor.string as NSString).length
+            editor.setSelectedRange(NSRange(location: caret, length: 0))
+            editor.scrollRangeToVisible(NSRange(location: caret, length: 0))
         }
     }
 

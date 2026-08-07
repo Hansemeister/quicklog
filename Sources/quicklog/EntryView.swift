@@ -472,11 +472,13 @@ enum MarkdownBlock {
         return hashes
     }
 
-    /// `- text` / `* text` / `+ text` -> `text`
+    /// `- text` / `* text` / `+ text` -> `text`. The space is required so `-5` or
+    /// `-word` stay paragraphs — except before a checkbox, where `-[]` is a
+    /// common typo and unambiguous.
     private static func bulletMarker(_ line: String) -> String? {
         guard let first = line.first, "-*+".contains(first) else { return nil }
         let rest = line.dropFirst()
-        guard rest.first == " " else { return nil }
+        guard rest.first == " " || TaskLine.split(String(rest)) != nil else { return nil }
         return String(rest).trimmingCharacters(in: .whitespaces)
     }
 }

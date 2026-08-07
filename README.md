@@ -141,8 +141,12 @@ just todos   # every open `- [ ]` line across all day files, with file + line
 ```
 
 Plain GitHub-style markdown — no separate todo store, no new file format. Works
-with `-`, `*` and `+`, and with nesting. A box needs a space after the bullet
-(`- [ ]`, not `-[ ]`).
+with `-`, `*` and `+`, and with nesting. Both shorthands are accepted as
+unchecked: `- []` (nothing in the box) and `-[]` (no space after the bullet).
+Clicking one normalises it to `- [x]`/`- [ ]`, filling in whatever was missing.
+
+Dropping the space after the bullet is only allowed before a box, so `-5 degrees`
+and `-word` still render as plain text rather than turning into bullets.
 
 The box can't own a click gesture of its own. The entry body's click-to-edit
 gesture is `simultaneousGesture` (so text selection still works), which means a
@@ -255,7 +259,7 @@ composer renders as you type.
 just test
 ```
 
-`Tests/main.swift` — 29 checks over storage: that a user's own `##` headers
+`Tests/main.swift` — 44 checks over storage: that a user's own `##` headers
 don't split an entry, that editing an old entry preserves its file name, title,
 preamble and every other stamp, the file layout, blank edit = delete, the
 file-removal rules, and per-line checkbox resolve/reopen.

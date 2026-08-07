@@ -57,7 +57,7 @@ today:
 
 # list every unresolved checkbox across all days
 todos:
-    @grep -rn -- "- \[ \]" ~/Library/Application\ Support/quicklog/*.md 2>/dev/null || echo "no open todos"
+    @grep -rEn -- "[-*+] ?\[ ?\]" ~/Library/Application\ Support/quicklog/*.md 2>/dev/null || echo "no open todos"
 
 # delete all journal data (asks first)
 # Stops the app first: the single-instance lock lives in that folder, and

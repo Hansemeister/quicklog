@@ -262,11 +262,22 @@ enum TaskLine {
     }
 
     /// A bullet's text (`[ ] foo`) -> is it done, and the text after the box.
+    /// `[]` with nothing between the brackets counts as unchecked — it's what
+    /// you type when you're in a hurry.
     static func split(_ bulletText: String) -> (done: Bool, text: String)? {
         let lower = bulletText.lowercased()
-        guard lower.hasPrefix("[ ]") || lower.hasPrefix("[x]") else { return nil }
-        return (lower.hasPrefix("[x]"),
-                String(bulletText.dropFirst(3)).trimmingCharacters(in: .whitespaces))
+        let box: (width: Int, done: Bool)
+        if lower.hasPrefix("[ ]") {
+            box = (3, false)
+        } else if lower.hasPrefix("[x]") {
+            box = (3, true)
+        } else if lower.hasPrefix("[]") {
+            box = (2, false)
+        } else {
+            return nil
+        }
+        return (box.done,
+                String(bulletText.dropFirst(box.width)).trimmingCharacters(in: .whitespaces))
     }
 
     /// Every checkbox in the body, in source order. Each one resolves on its own,
@@ -283,25 +294,39 @@ enum TaskLine {
     }
 
     /// Flips the checkbox on one line. Indentation and bullet character are left
-    /// as the user wrote them. A line that isn't a checkbox is left alone.
+    /// as the user wrote them, but a missing space after the bullet is filled in,
+    /// so `-[]` lands as `- [x]`. A line that isn't a checkbox is left alone.
     static func setDone(in body: String, line: Int, done: Bool) -> String {
         var lines = body.components(separatedBy: "\n")
         guard lines.indices.contains(line),
               let range = markerRange(in: lines[line])
         else { return body }
-        lines[line] = lines[line].replacingCharacters(in: range, with: done ? "[x]" : "[ ]")
+        let bulletHasSpace = lines[line][..<range.lowerBound].last == " "
+        lines[line] = lines[line].replacingCharacters(
+            in: range,
+            with: (bulletHasSpace ? "" : " ") + (done ? "[x]" : "[ ]")
+        )
         return lines.joined(separator: "\n")
     }
 
-    /// Range of the `[ ]`/`[x]` marker, or nil if the line isn't a checkbox.
+    /// Range of the `[ ]`/`[x]`/`[]` marker, or nil if the line isn't a checkbox.
+    /// The space after the bullet is optional here — `-[]` is a common typo, and
+    /// only a box can follow a bullet without one. Replacing this range is what
+    /// resolves a box, so both shorthands get normalised on the first click.
     private static func markerRange(in line: String) -> Range<String.Index>? {
         let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
         guard let bullet = trimmed.first, "-*+".contains(bullet) else { return nil }
         let rest = trimmed.dropFirst().drop(while: { $0 == " " })
-        guard rest.count < trimmed.count - 1 else { return nil } // needs a space after the bullet
         let box = rest.prefix(3).lowercased()
-        guard box == "[ ]" || box == "[x]" else { return nil }
-        return rest.startIndex..<line.index(rest.startIndex, offsetBy: 3)
+        let width: Int
+        if box == "[ ]" || box == "[x]" {
+            width = 3
+        } else if box.hasPrefix("[]") {
+            width = 2
+        } else {
+            return nil
+        }
+        return rest.startIndex..<line.index(rest.startIndex, offsetBy: width)
     }
 }
 

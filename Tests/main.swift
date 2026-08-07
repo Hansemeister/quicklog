@@ -152,12 +152,14 @@ func testTaskLines() {
     * [ ] star bullet
     """
     let boxes = TaskLine.items(in: body)
-    expect(boxes.count, 3, "finds the three real checkboxes")
-    expect(boxes.map(\.line), [0, 1, 4], "reports source line numbers")
-    expect(boxes.map(\.done), [false, true, false], "reads each state")
-    expect(boxes.map(\.text), ["send email to X", "already done", "star bullet"],
+    expect(boxes.count, 4, "finds the four checkboxes")
+    expect(boxes.map(\.line), [0, 1, 3, 4], "reports source line numbers")
+    expect(boxes.map(\.done), [false, true, false, false], "reads each state")
+    expect(boxes.map(\.text),
+           ["send email to X", "already done", "no space after the bullet", "star bullet"],
            "strips the box and indentation from the label")
     check(TaskLine.items(in: "- plain bullet").isEmpty, "plain bullets aren't checkboxes")
+    check(TaskLine.items(in: "-5 degrees outside").isEmpty, "a dash without a box isn't a checkbox")
 
     expect(TaskLine.setDone(in: body, line: 0, done: true), """
     - [x] send email to X
@@ -177,6 +179,28 @@ func testTaskLines() {
 
     expect(TaskLine.setDone(in: body, line: 2, done: true), body, "a non-checkbox line is untouched")
     expect(TaskLine.setDone(in: body, line: 99, done: true), body, "out-of-range line is untouched")
+
+    // `- []` and `-[]` are what you type in a hurry. Accepted as unchecked, and
+    // normalised — box and missing space both — the first time they're resolved.
+    let short = "- [] no space in the box"
+    expect(TaskLine.items(in: short).count, 1, "`- []` counts as a checkbox")
+    expect(TaskLine.items(in: short).first?.done, false, "`- []` is unchecked")
+    expect(TaskLine.items(in: short).first?.text, "no space in the box", "`- []` label strips the box")
+    expect(TaskLine.setDone(in: short, line: 0, done: true), "- [x] no space in the box",
+           "resolving `- []` normalises the marker")
+    expect(TaskLine.setDone(in: short, line: 0, done: false), "- [ ] no space in the box",
+           "reopening `- []` normalises it too")
+    expect(TaskLine.split("[] thing")?.text, "thing", "split handles the short box")
+
+    for cramped in ["-[] both shorthands", "-[ ] both shorthands", "  -[x] both shorthands"] {
+        expect(TaskLine.items(in: cramped).count, 1, "`\(cramped)` counts as a checkbox")
+        expect(TaskLine.items(in: cramped).first?.text, "both shorthands",
+               "`\(cramped)` label strips the box")
+    }
+    expect(TaskLine.setDone(in: "-[] thing", line: 0, done: true), "- [x] thing",
+           "resolving `-[]` inserts the missing space after the bullet")
+    expect(TaskLine.setDone(in: "  -[x] thing", line: 0, done: false), "  - [ ] thing",
+           "the inserted space keeps the indentation")
 
     expect(TaskLine.split("[ ] thing")?.text, "thing", "split strips the box")
     check(TaskLine.split("[x] thing")?.done == true, "split reads the state")

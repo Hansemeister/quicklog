@@ -5,38 +5,58 @@ import SwiftUI
 struct EntryView: View {
     @ObservedObject var store: JournalStore
     @FocusState private var composerFocused: Bool
+    /// Fallback focus for the inline editor, used only when the AppKit route
+    /// below fails — see `focusEditor`.
+    @FocusState private var editorFocused: Bool
     @State private var showPreview = false
     @State private var hoveredEntryID: String?
     /// The checkbox the cursor is currently over, if any. A click on the entry
     /// resolves this one instead of opening the editor.
-    @State private var hoveredBox: TaskLine.Item?
-    /// Arrow-key navigation: the monitor's token, and which end of the next
-    /// editor the caret belongs at — top when arriving from above.
-    @State private var keyMonitor: Any?
+    @State private var hoveredBox: HoveredBox?
+    /// Which end of the next editor the caret belongs at — top when arriving from
+    /// above. Written by the arrow-key monitor.
     @State private var arrivingFromAbove = false
 
     /// Composer height, dragged via the divider and remembered across launches.
     @AppStorage("quicklog.composerHeight") private var composerHeight: Double = 150
-    @State private var dragStartHeight: Double?
 
     private let minComposerHeight: Double = 110
     private let maxComposerHeight: Double = 520
     /// The entry list never shrinks past this, so the handle always stays
     /// reachable and both panes stay usable.
     private let minEntriesHeight: Double = 120
-    private let handleHeight: Double = 11
+    /// Definite heights for the past-day footer, so the entry list above it can
+    /// be given one too. `pastDayNoticeHeight` fits the caption plus its padding.
+    private let pastDayNoticeHeight: Double = 38
+    private let dividerThickness: Double = 1
+
+    /// A hovered checkbox and the entry it belongs to. The line number alone is
+    /// not an identity: two entries both have a line 0, so one row's exit would
+    /// clear the other row's box — and the click that followed opened the editor
+    /// instead of toggling, or worse, toggled the wrong entry.
+    private struct HoveredBox: Equatable {
+        let entryID: String
+        let item: TaskLine.Item
+    }
+
+    private static let bottomAnchor = "bottom"
 
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
                 entryList
+                    .frame(height: entriesHeight(available: geo.size.height))
                 if store.isViewingToday {
-                    resizeHandle(available: geo.size.height)
+                    ComposerDivider(
+                        height: $composerHeight,
+                        clamp: { clamped($0, available: geo.size.height) }
+                    )
                     composer
                         .frame(height: clamped(composerHeight, available: geo.size.height))
                 } else {
                     Divider()
                     pastDayNotice
+                        .frame(height: pastDayNoticeHeight)
                 }
             }
         }
@@ -46,52 +66,43 @@ struct EntryView: View {
         .onChange(of: store.editingEntryID) { _, editing in
             if editing == nil { composerFocused = true }
         }
-        .onAppear {
-            guard keyMonitor == nil else { return }
-            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                handleArrow(event) ? nil : event
-            }
-        }
+        .arrowNavigation(store: store, arrivingFromAbove: $arrivingFromAbove)
         .onDisappear {
-            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
-            keyMonitor = nil
+            // Nothing else will pop a cursor this view pushed once it is gone.
+            setHoveredBox(nil)
         }
-    }
-
-    /// ↑/↓ at the edge of a text view step between the composer and the entries
-    /// above it, so a run of notes can be reviewed without the mouse. Returns
-    /// true when the event was handled and should not travel further.
-    ///
-    /// A local monitor rather than a custom `NSTextView`: `TextEditor` exposes no
-    /// key handling, and replacing it would mean owning the text system.
-    private func handleArrow(_ event: NSEvent) -> Bool {
-        let up: UInt16 = 126
-        // Arrow keys always carry `.function` and `.numericPad`, so only the
-        // modifiers a person can hold down disqualify the event.
-        let held: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
-        guard event.keyCode == up || event.keyCode == 125,
-              event.modifierFlags.intersection(held).isEmpty,
-              let window = event.window as? QuicklogPanel,
-              let editor = window.firstResponder as? NSTextView
-        else { return false }
-
-        // Let the text view move the caret first: it knows where wrapped lines
-        // break, and a caret that then hasn't moved is what "already at the
-        // edge" means. Either way the move is done, so the event is spent.
-        let before = editor.selectedRange().location
-        if event.keyCode == up { editor.moveUp(nil) } else { editor.moveDown(nil) }
-        guard editor.selectedRange().location == before else { return true }
-
-        arrivingFromAbove = event.keyCode != up
-        return event.keyCode == up ? store.editEntryAbove() : store.editEntryBelow()
     }
 
     /// Keeps the composer between its own minimum and whatever leaves the entry
     /// list at least `minEntriesHeight` — also applied on render, so shrinking
     /// the window can't strand the divider off-screen.
     private func clamped(_ height: Double, available: Double) -> Double {
-        let ceiling = max(minComposerHeight, available - minEntriesHeight - handleHeight)
+        let ceiling = max(
+            minComposerHeight,
+            available - minEntriesHeight - ComposerDivider.thickness
+        )
         return min(max(height, minComposerHeight), min(maxComposerHeight, ceiling))
+    }
+
+    /// A *definite* height for the entry list, subtracting whatever sits below it.
+    ///
+    /// This was `.frame(maxHeight: .infinity)`. A flexible frame wrapping a
+    /// `ScrollView` makes it measure its own content to resolve a height, which
+    /// showed up as the single hottest layout frame while the list was spinning.
+    /// Pinning the height removes that negotiation.
+    ///
+    /// It is *not* what fixed the freeze — the spin survived this change; the
+    /// `VStack` in `entryList` is the fix. Kept because the measurement work it
+    /// avoids is real, and because both panes now size the same way.
+    ///
+    /// Caveat: `pastDayNoticeHeight` is a fixed 38pt, so the footer's caption
+    /// would clip at large accessibility text sizes. Measure it instead if that
+    /// ever matters.
+    private func entriesHeight(available: Double) -> Double {
+        let below = store.isViewingToday
+            ? ComposerDivider.thickness + clamped(composerHeight, available: available)
+            : dividerThickness + pastDayNoticeHeight
+        return max(minEntriesHeight, available - below)
     }
 
     // MARK: Entries
@@ -99,7 +110,20 @@ struct EntryView: View {
     private var entryList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
+                // A plain VStack, not a LazyVStack. Lazy placement measures each
+                // row against the visible rect while the ScrollView sizes its
+                // content from those rows; once the content overflowed and was
+                // scrolled, the two drove each other and never settled — a core
+                // pegged at ~100%, memory climbing past 300M, window
+                // unresponsive. A day holds a handful of entries, so laziness
+                // bought nothing to trade against that.
+                //
+                // Do not "optimise" this back to LazyVStack. Bisected by sample:
+                // the cycle survived removing .textSelection, both .onHover
+                // modifiers, the .animation modifiers, and pinning every height.
+                // Only dropping laziness stopped it. It needs enough content to
+                // overflow, which is why short days look fine.
+                VStack(alignment: .leading, spacing: 18) {
                     if store.entries.isEmpty {
                         Text("No entries yet.")
                             .foregroundStyle(.secondary)
@@ -109,18 +133,17 @@ struct EntryView: View {
                         entryRow(entry)
                             .id(entry.id)
                     }
-                    Color.clear.frame(height: 1).id(bottomAnchor)
+                    Color.clear.frame(height: 1).id(Self.bottomAnchor)
                 }
                 .padding(20)
                 .animation(.easeInOut(duration: 0.22), value: store.entries.map(\.id))
                 .animation(.easeInOut(duration: 0.12), value: hoveredEntryID)
             }
-            .frame(maxHeight: .infinity)
             .onChange(of: store.entries.count) { _, _ in
-                withAnimation { proxy.scrollTo(bottomAnchor, anchor: .bottom) }
+                withAnimation { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
             }
             .onChange(of: store.selectedDay) { _, _ in
-                proxy.scrollTo(bottomAnchor, anchor: .bottom)
+                proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
             }
             // Arrow-key navigation can open an entry that's scrolled out of view.
             .onChange(of: store.editingEntryID) { _, editing in
@@ -146,12 +169,14 @@ struct EntryView: View {
             if store.isEditing(entry) {
                 inlineEditor
             } else {
-                MarkdownText(entry.body) { box, inside in
+                MarkdownText(entry.body) { item, inside in
+                    let box = HoveredBox(entryID: entry.id, item: item)
                     // Ordering isn't guaranteed when moving between two adjacent
-                    // boxes, so only the box that claimed the cursor may clear it.
+                    // boxes, so a box may only clear its own claim — matched on
+                    // the entry as well as the line.
                     if inside {
                         setHoveredBox(box)
-                    } else if hoveredBox?.line == box.line {
+                    } else if hoveredBox == box {
                         setHoveredBox(nil)
                     }
                 }
@@ -174,8 +199,9 @@ struct EntryView: View {
                 hoveredEntryID = nil
                 // The cursor can leave the row without the box's own onHover
                 // firing (a deleted row, a scroll). Reset here so the pointing
-                // hand can't get stuck.
-                setHoveredBox(nil)
+                // hand can't get stuck — unconditionally, because a claim this
+                // row's box failed to release is exactly the state to clear.
+                if hoveredBox?.entryID == entry.id { setHoveredBox(nil) }
             }
         }
         // Click the text to edit it — or a checkbox to resolve it.
@@ -187,8 +213,10 @@ struct EntryView: View {
         .simultaneousGesture(
             TapGesture().onEnded {
                 guard !store.isEditing(entry) else { return }
-                if let box = hoveredBox {
-                    store.setTaskDone(entry, line: box.line, done: !box.done)
+                // Only a box belonging to *this* entry may claim the click; a
+                // stale claim from another row must not toggle anything here.
+                if let box = hoveredBox, box.entryID == entry.id {
+                    store.setTaskDone(entry, line: box.item.line, done: !box.item.done)
                 } else {
                     edit(entry)
                 }
@@ -199,7 +227,8 @@ struct EntryView: View {
             Button("Delete", role: .destructive) { store.delete(entry) }
         }
         // Fade + collapse on delete — the macOS convention for a row leaving a
-        // list (Mail, Reminders, Notes).
+        // list (Mail, Reminders, Notes). Editing a body does not change the row's
+        // id, so this plays on delete only.
         .transition(
             .asymmetric(
                 insertion: .opacity,
@@ -216,6 +245,7 @@ struct EntryView: View {
             TextEditor(text: $store.editDraft)
                 .font(.system(.body, design: .monospaced))
                 .scrollContentBackground(.hidden)
+                .focused($editorFocused)
                 .frame(minHeight: 90, maxHeight: 280)
                 .padding(2)
                 .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
@@ -223,6 +253,7 @@ struct EntryView: View {
                     RoundedRectangle(cornerRadius: 4)
                         .stroke(Color.secondary.opacity(0.3))
                 )
+                .background(EditorAnchor(box: anchorBox))
                 .onAppear { focusEditor(atTop: arrivingFromAbove) }
             HStack(spacing: 8) {
                 Text("Clear the text to delete this entry.")
@@ -230,14 +261,11 @@ struct EntryView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("Cancel") { store.cancelEdit() }
-                Button(store.editDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                       ? "Delete" : "Save") { store.commitEdit() }
+                Button(store.editDraft.isBlank ? "Delete" : "Save") { store.commitEdit() }
                     .buttonStyle(.borderedProminent)
             }
         }
     }
-
-    private var bottomAnchor: String { "bottom" }
 
     /// Opening an entry by mouse puts the caret at its end, wherever the last
     /// arrow-key navigation happened to leave the direction.
@@ -246,24 +274,39 @@ struct EntryView: View {
         store.beginEdit(entry)
     }
 
+    // MARK: Editor focus
+
+    /// A marker view planted in the inline editor's own subtree, so its
+    /// `NSTextView` can be found by position on screen. Held in a box rather than
+    /// as `@State` of its own: `makeNSView` fills it in synchronously, and this
+    /// way finding the editor never waits on a view update.
+    @State private var anchorBox = EditorAnchorBox()
+
     /// Focuses the inline editor and parks the caret at one end of it — the end
     /// it was entered from, so ↑/↓ carry on in the same direction.
     ///
     /// Done on the text view rather than through `@FocusState` +
-    /// `TextSelection`: SwiftUI parks the caret at offset 0 when the editor
-    /// takes focus, and both of those lose the race with it.
+    /// `TextSelection`: SwiftUI parks the caret at offset 0 when the editor takes
+    /// focus, and both of those lose the race with it.
     ///
-    /// The editor is identified by its contents — there are two text views in
-    /// the panel (this one and the composer) and view order isn't guaranteed,
-    /// but only this one holds `editDraft`. It may not be in the hierarchy on
-    /// the first pass, hence the retries.
+    /// The text view is found from `editorAnchor` — a zero-size marker installed
+    /// as this editor's background, so it carries the editor's frame — by asking
+    /// which text view covers it. Matching on *contents* used to do this job and
+    /// picked the composer whenever the two happened to hold the same text.
+    /// `LazyVStack` may not have laid the row out yet, hence the retries; if they
+    /// all lose, `@FocusState` still puts the keyboard in the editor (caret at
+    /// 0), because focus landing nowhere leaves arrow navigation dead until the
+    /// user clicks.
     private func focusEditor(atTop: Bool, attempt: Int = 0) {
         DispatchQueue.main.async {
             guard let window = NSApp.windows.first(where: { $0 is QuicklogPanel }),
-                  let root = window.contentView,
-                  let editor = Self.textView(in: root, holding: store.editDraft)
+                  let editor = anchorBox.view.flatMap(Self.textView(near:))
             else {
-                if attempt < 5 { focusEditor(atTop: atTop, attempt: attempt + 1) }
+                if attempt < 5 {
+                    focusEditor(atTop: atTop, attempt: attempt + 1)
+                } else {
+                    editorFocused = true
+                }
                 return
             }
             window.makeFirstResponder(editor)
@@ -273,53 +316,39 @@ struct EntryView: View {
         }
     }
 
-    /// Single funnel for the hovered checkbox so the pointing-hand cursor's
-    /// pushes and pops stay balanced — an unbalanced push leaves the wrong cursor
-    /// everywhere until the app restarts.
-    private func setHoveredBox(_ box: TaskLine.Item?) {
-        if box != nil, hoveredBox == nil { NSCursor.pointingHand.push() }
-        if box == nil, hoveredBox != nil { NSCursor.pop() }
-        hoveredBox = box
-    }
-
-    private static func textView(in view: NSView, holding text: String) -> NSTextView? {
-        if let editor = view as? NSTextView, editor.string == text { return editor }
-        for sub in view.subviews {
-            if let found = textView(in: sub, holding: text) { return found }
-        }
-        return nil
-    }
-
-    // MARK: Resizable split
-
-    /// Drag to change the entries/composer ratio.
+    /// The text view the marker is standing in front of.
     ///
-    /// The gesture must measure in `.global` space: in local space the handle
-    /// moves as the height changes, so each frame reads a shifted origin and the
-    /// divider oscillates under the cursor.
-    private func resizeHandle(available: Double) -> some View {
-        ZStack {
-            Divider()
-            RoundedRectangle(cornerRadius: 2)
-                .fill(Color.secondary.opacity(0.35))
-                .frame(width: 44, height: 4)
-        }
-        .frame(height: handleHeight)
-        .contentShape(Rectangle())
-        .onHover { inside in
-            if inside { NSCursor.resizeUpDown.set() } else { NSCursor.arrow.set() }
-        }
-        .gesture(
-            DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                .onChanged { value in
-                    let base = dragStartHeight ?? composerHeight
-                    if dragStartHeight == nil { dragStartHeight = base }
-                    let dy = value.location.y - value.startLocation.y
-                    composerHeight = clamped(base - dy, available: available)
-                }
-                .onEnded { _ in dragStartHeight = nil }
-        )
-        .help("Drag to resize")
+    /// The marker is installed as this editor's `.background`, so it carries the
+    /// editor's own frame: the text view whose visible box covers it is the right
+    /// one, wherever SwiftUI happened to put either in the AppKit hierarchy. An
+    /// empty marker frame means layout hasn't run yet — the caller retries.
+    private static func textView(near anchor: NSView) -> NSTextView? {
+        guard let root = anchor.window?.contentView else { return nil }
+        let marker = anchor.convert(anchor.bounds, to: root)
+        guard !marker.isEmpty else { return nil }
+        return textViews(in: root)
+            .map { editor -> (editor: NSTextView, overlap: CGFloat) in
+                // The scroll view, not the text view: a text view's own frame is
+                // its document size, which can run far past what's on screen.
+                let box: NSView = editor.enclosingScrollView ?? editor
+                let rect = box.convert(box.bounds, to: root).intersection(marker)
+                return (editor, rect.isNull ? 0 : rect.width * rect.height)
+            }
+            .filter { $0.overlap > 0 }
+            .max { $0.overlap < $1.overlap }?
+            .editor
+    }
+
+    private static func textViews(in view: NSView) -> [NSTextView] {
+        if let editor = view as? NSTextView { return [editor] }
+        return view.subviews.flatMap(textViews(in:))
+    }
+
+    /// Single funnel for the hovered checkbox, so the pointing-hand cursor is
+    /// owned in one place (`Pointer`) rather than pushed per box.
+    private func setHoveredBox(_ box: HoveredBox?) {
+        hoveredBox = box
+        Pointer.show(box == nil ? nil : .pointingHand)
     }
 
     // MARK: Composer
@@ -366,7 +395,7 @@ struct EntryView: View {
                     .controlSize(.mini)
                     .font(.caption)
                 Button("Save") { store.saveDraft() }
-                    .disabled(store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(store.draft.isBlank)
             }
             .padding(.horizontal, 14)
             .padding(.bottom, 10)
@@ -378,7 +407,13 @@ struct EntryView: View {
     private var pastDayNotice: some View {
         HStack {
             Image(systemName: "clock.arrow.circlepath")
-            Text("Past day — edit or delete entries here; new entries go to today.")
+            // The composer is hidden here but its draft is kept, and ⌘↩ still
+            // saves it — to today, jumping there. Said out loud, because text
+            // you can't see being written somewhere you aren't looking is not
+            // something to leave implicit.
+            Text(store.draft.isBlank
+                 ? "Past day — edit or delete entries here; new entries go to today."
+                 : "Past day — your unsaved draft is kept; ⌘↩ saves it to today.")
             Spacer()
             if let error = store.lastError {
                 Text(error)
@@ -396,145 +431,27 @@ struct EntryView: View {
     }
 }
 
-// MARK: - Markdown rendering
-
-/// Minimal block-level markdown renderer: headers (`#`..`###`), bullet lists
-/// (`-`/`*`/`+`) with nesting by indentation, and paragraphs. Inline `**bold**`,
-/// `*italic*`, and `` `code` `` are handled by Foundation's markdown parser.
-struct MarkdownText: View {
-    private let blocks: [MarkdownBlock]
-    /// Called as the cursor enters/leaves a checkbox, so the entry row's tap
-    /// gesture knows whether a click means "resolve this box" or "edit the
-    /// entry". The composer preview leaves it nil and stays inert.
-    private let onHoverBox: ((TaskLine.Item, Bool) -> Void)?
-
-    init(_ text: String, onHoverBox: ((TaskLine.Item, Bool) -> Void)? = nil) {
-        self.blocks = MarkdownBlock.parse(text)
-        self.onHoverBox = onHoverBox
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                switch block {
-                case let .heading(level, text):
-                    inline(text)
-                        .font(headingFont(level))
-                        .padding(.top, level == 1 ? 6 : 4)
-                case let .bullet(indent, text):
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(bulletGlyph(indent))
-                            .foregroundStyle(.secondary)
-                        inline(text)
-                    }
-                    .padding(.leading, CGFloat(indent) * 16)
-                case let .task(line, indent, done, text):
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Image(systemName: done ? "checkmark.square" : "square")
-                            .foregroundStyle(done ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tint))
-                            .contentShape(Rectangle())
-                            .onHover { inside in
-                                onHoverBox?(TaskLine.Item(line: line, done: done, text: text), inside)
-                            }
-                        inline(text)
-                            .foregroundStyle(done ? .secondary : .primary)
-                            .strikethrough(done, color: .secondary)
-                    }
-                    .padding(.leading, CGFloat(indent) * 16)
-                case let .paragraph(text):
-                    inline(text)
-                case .blank:
-                    Spacer().frame(height: 6)
-                }
-            }
-        }
-        .textSelection(.enabled)
-    }
-
-    private func inline(_ text: String) -> Text {
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )
-        if let attributed = try? AttributedString(markdown: text, options: options) {
-            return Text(attributed)
-        }
-        return Text(text)
-    }
-
-    private func headingFont(_ level: Int) -> Font {
-        switch level {
-        case 1: return .system(.title2, weight: .bold)
-        case 2: return .system(.title3, weight: .semibold)
-        default: return .system(.headline, weight: .semibold)
-        }
-    }
-
-    private func bulletGlyph(_ indent: Int) -> String {
-        switch indent % 3 {
-        case 0: return "•"
-        case 1: return "◦"
-        default: return "▪"
-        }
-    }
+/// Where the inline editor's marker view is kept. A reference so the marker is
+/// available the instant AppKit makes it, without a SwiftUI update in between.
+@MainActor
+final class EditorAnchorBox {
+    /// Weak: the marker is owned by whatever superview SwiftUI puts it in.
+    weak var view: NSView?
 }
 
-enum MarkdownBlock {
-    case heading(level: Int, text: String)
-    case bullet(indent: Int, text: String)
-    /// `- [ ]` / `- [x]` — a bullet that can be resolved. `line` is its line
-    /// number in the entry body, which is how a click identifies it.
-    case task(line: Int, indent: Int, done: Bool, text: String)
-    case paragraph(String)
-    case blank
+/// Zero-size view whose `NSView` marks where the inline editor lives on screen.
+/// SwiftUI gives no handle on `TextEditor`'s text view, and this is cheaper than
+/// reimplementing it.
+private struct EditorAnchor: NSViewRepresentable {
+    let box: EditorAnchorBox
 
-    static func parse(_ text: String) -> [MarkdownBlock] {
-        var blocks: [MarkdownBlock] = []
-        for (lineNumber, rawLine) in text.components(separatedBy: "\n").enumerated() {
-            let line = rawLine.replacingOccurrences(of: "\t", with: "  ")
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-
-            if trimmed.isEmpty {
-                if case .blank = blocks.last { continue }
-                blocks.append(.blank)
-                continue
-            }
-
-            if let level = headingLevel(trimmed) {
-                let body = String(trimmed.dropFirst(level)).trimmingCharacters(in: .whitespaces)
-                blocks.append(.heading(level: min(level, 3), text: body))
-                continue
-            }
-
-            if let marker = bulletMarker(trimmed) {
-                let leading = line.prefix(while: { $0 == " " }).count
-                if let (done, text) = TaskLine.split(marker) {
-                    blocks.append(.task(line: lineNumber, indent: leading / 2, done: done, text: text))
-                } else {
-                    blocks.append(.bullet(indent: leading / 2, text: marker))
-                }
-                continue
-            }
-
-            blocks.append(.paragraph(trimmed))
-        }
-        while case .blank = blocks.last { blocks.removeLast() }
-        return blocks
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        box.view = view
+        return view
     }
 
-    private static func headingLevel(_ line: String) -> Int? {
-        let hashes = line.prefix(while: { $0 == "#" }).count
-        guard hashes >= 1, hashes <= 6 else { return nil }
-        guard line.dropFirst(hashes).first == " " else { return nil }
-        return hashes
-    }
-
-    /// `- text` / `* text` / `+ text` -> `text`. The space is required so `-5` or
-    /// `-word` stay paragraphs — except before a checkbox, where `-[]` is a
-    /// common typo and unambiguous.
-    private static func bulletMarker(_ line: String) -> String? {
-        guard let first = line.first, "-*+".contains(first) else { return nil }
-        let rest = line.dropFirst()
-        guard rest.first == " " || TaskLine.split(String(rest)) != nil else { return nil }
-        return String(rest).trimmingCharacters(in: .whitespaces)
+    func updateNSView(_ view: NSView, context: Context) {
+        box.view = view
     }
 }

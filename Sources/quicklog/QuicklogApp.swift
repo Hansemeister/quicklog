@@ -29,6 +29,11 @@ enum QuicklogMain {
 /// Enforced with an advisory lock on a file in the storage directory. The kernel
 /// drops the lock when the process dies, so a crash cannot leave it stuck — and
 /// unlike a bundle-identifier check it also covers running the bare binary.
+///
+/// Best effort by design: if the lock cannot be taken *for any reason other than
+/// another instance holding it*, the app starts anyway and logs why. A duplicate
+/// menu-bar icon is a bad outcome; an app that silently refuses to launch — no
+/// window, no icon, no message — is a worse one.
 enum SingleInstance {
     /// Sent by a second launch so the instance that owns the lock surfaces.
     static let showNotification = Notification.Name("com.bigbrain.quicklog.show")
@@ -39,11 +44,31 @@ enum SingleInstance {
         let path = StorageManager.shared.directory
             .appendingPathComponent(".instance.lock").path
         fd = open(path, O_CREAT | O_RDWR, 0o644)
-        // Can't even open the lock file: don't block startup over it.
-        guard fd >= 0 else { return true }
-        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+        guard fd >= 0 else {
+            NSLog("quicklog: can't open the instance lock (%s) — starting without it",
+                  strerror(errno))
+            return true
+        }
+
+        // `flock` is interruptible even with LOCK_NB, and a signal is not
+        // contention.
+        var attempts = 0
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            let code = errno
+            if code == EINTR, attempts < 3 {
+                attempts += 1
+                continue
+            }
             close(fd)
             fd = -1
+            // Only these two mean "someone else holds it". Anything else — a
+            // filesystem that doesn't implement flock, for instance — must not
+            // end the launch.
+            guard code == EWOULDBLOCK || code == EAGAIN else {
+                NSLog("quicklog: instance lock unavailable (%s) — starting without it",
+                      strerror(code))
+                return true
+            }
             return false
         }
         return true
@@ -86,6 +111,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Quitting must not be the one exit that loses typing: every other way out
+        // of the inline editor saves a changed body, so this one does too.
+        if store.hasUnsavedEdit { store.endEdit() }
         panelController.saveFrame()
     }
 
@@ -153,6 +181,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// inline editor both have one, two SwiftUI buttons claiming the same
     /// shortcut makes which fires arbitrary, and swapping the shortcut between
     /// them as editing starts sends the hosting view into a layout loop.
+    ///
+    /// On a past day the composer is hidden but its draft is kept, and this saves
+    /// it to today and jumps there — the past-day notice says as much while a
+    /// draft is pending, so nothing is written out of sight.
     @objc private func saveEntry() {
         MainActor.assumeIsolated {
             guard panelController.isVisible else { return }
@@ -311,5 +343,14 @@ final class Hotkey {
             return nil
         }
         Hotkey.current = self
+    }
+
+    /// Hygiene only — the one hotkey lives as long as the process. Carbon
+    /// registrations are process-global, so releasing them explicitly is the
+    /// correct shape even when nothing observes it.
+    deinit {
+        if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
+        if let eventHandler { RemoveEventHandler(eventHandler) }
+        if Hotkey.current === self { Hotkey.current = nil }
     }
 }

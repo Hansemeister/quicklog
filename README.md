@@ -75,7 +75,7 @@ cp Resources/Info.plist .build/quicklog.app/Contents/Info.plist
 | `esc` | cancel the edit, or hide the panel when not editing |
 | `⌘W` | hide panel |
 | `⌘A` `⌘C` `⌘X` `⌘V` `⌘Z` | select all / copy / cut / paste / undo (text) |
-| `⌘Q` | quit |
+| `⌘Q` | quit — an entry you were editing is saved first |
 
 `⌘↩` is a *Save Entry* item in the app menu, so it fires regardless of which text
 box has focus. `⌘Z` is the text field's own undo — undoing an *entry* change uses
@@ -89,6 +89,13 @@ The composer sits below the entry list, on today only. Type markdown, toggle
 
 Drag the handle above the composer to change the split. The height is remembered
 across launches; neither pane can collapse (composer ≥110 pt, list ≥120 pt).
+
+Past midnight the day rolls over on its own: a new day appears in the sidebar and
+the composer follows it, keeping whatever you were typing.
+
+On a past day the composer is hidden. Anything already typed into it is kept, and
+`⌘↩` saves it to today and jumps there — the notice at the bottom says so while a
+draft is pending.
 
 ## Reviewing and editing
 
@@ -124,7 +131,8 @@ unless the file has hand-written preamble text, which is kept.
 Two arrow buttons in the header, right of the sidebar toggle. Covers saves,
 edits, deletes and checkbox resolves; 50 steps deep; a new change clears the redo
 stack; undo jumps the sidebar to the affected day. In-memory only — quitting
-clears it.
+clears it. An undo that can't write is reported and stays on the stack, so it can
+be retried rather than looking like it worked.
 
 ## Checkboxes
 
@@ -143,10 +151,11 @@ just todos   # every open `- [ ]` line across all day files, with file + line
 ```
 
 Plain GitHub-style markdown — no separate todo store. Works with `-`, `*` and
-`+`, and with nesting. Two shorthands are accepted as unchecked and normalised on
-the first click: `- []` (nothing in the box) and `-[]` (no space after the
-bullet). Dropping the space is only allowed before a box, so `-5 degrees` and
-`-word` stay plain text.
+`+`, with nesting, and with tab or space indentation. Two shorthands are accepted
+as unchecked and normalised on the first click: `- []` (nothing in the box) and
+`-[]` (no space after the bullet). Dropping the space is only allowed before a box,
+so `-5 degrees` and `-word` stay plain text. Whatever renders as a box can be
+clicked — one parser decides both.
 
 ## Sidebar
 
@@ -178,8 +187,16 @@ first entry, **markdown** allowed
 - [x] resolved task
 ```
 
-Entries split on lines matching exactly `## HH:mm`. Your own `##` headers inside
-an entry are left alone.
+Entries split on lines matching exactly `## HH:mm`. Near misses are safe — `## 12:00
+lunch`, `##12:00`, `## 1:2` and `### 12:00` all stay part of the entry.
+
+**Format constraint:** a line consisting of *exactly* `## HH:mm` cannot appear
+inside an entry body. Written from the app it saves fine, but reading the file back
+treats it as a stamp and splits the note in two at that line. Nothing is lost — the
+text is on disk as typed — and joining the halves by hand fixes it. This is
+accepted deliberately: the alternative was escaping such lines as `\## HH:mm` on
+disk, and the files are meant to stay free of escape characters. Write `##  14:00`
+(two spaces) or `## 14:00 standup` if you need the heading.
 
 - `just data` — open the folder
 - `just today` — cat today's file
@@ -221,6 +238,19 @@ Headers `#`/`##`/`###`, bullets `-`/`*`/`+` with 2-space nesting, checkboxes
     unticked.
 16. Click the leftmost header button — the day list collapses, the button stays
     on the left. Click again to restore.
+17. Two entries that each have a checkbox on their first line. Hover one box, move
+    straight to the other, click — only the box under the pointer ticks, and the
+    editor must not open.
+18. Save `-<tab>[ ] tabbed` (a literal tab after the dash) and click its box — it
+    ticks. Anything drawn as a box must be clickable.
+19. Hover a checkbox, then `esc` to hide the panel — the pointer goes back to the
+    arrow rather than staying a pointing hand over other apps.
+20. Click an entry's text — caret at the end. `↑` from the composer — caret at the
+    end of the last entry. Both must land focused, first try.
+21. Type into the composer, click a past day, `⌘↩` — the notice said the draft was
+    kept, and it lands on today with the view jumping there.
+22. Tick a checkbox and watch the row: it must update in place, not fade out and
+    back in.
 
 ## Tests
 
@@ -228,14 +258,18 @@ Headers `#`/`##`/`###`, bullets `-`/`*`/`+` with 2-space nesting, checkboxes
 just test
 ```
 
-`Tests/main.swift` — 44 checks over storage: `##` headers inside an entry don't
-split it, editing an old entry preserves file name/title/preamble/stamps, the
-file layout, blank edit = delete, file-removal rules, per-line checkbox
-resolve/reopen and both box shorthands.
+`Tests/main.swift` — 91 checks over storage, checkboxes and the markdown parser:
+near-miss `##` headers don't split an entry (and the exact-match case that does is
+pinned as a known format constraint), editing an old entry preserves file
+name/title/preamble/stamps, the file layout, blank edit = delete, file-removal
+rules, entry ids that ignore the body, edits addressed by id surviving an external
+insert above the target, an unknown id throwing, snapshot writes reporting failure,
+per-line checkbox resolve/reopen with every accepted shorthand, and the block
+parser (headings, blank collapsing, bullet nesting, task line numbers).
 
-A plain executable compiled against `StorageManager.swift`, not an XCTest target
-— XCTest ships with Xcode and this builds on Command Line Tools alone. Exits
-non-zero on failure.
+A plain executable compiled against the storage, checkbox and markdown files, not
+an XCTest target — XCTest ships with Xcode and this builds on Command Line Tools
+alone. Exits non-zero on failure.
 
 UI behaviour (panel, hotkey, caret, arrow navigation, drag) isn't covered — see
 the manual pass.
@@ -249,10 +283,18 @@ Resources/Info.plist
 Sources/quicklog/
   QuicklogApp.swift      # entry point, single-instance lock, hotkey, menus
   PanelController.swift  # floating NSPanel + root view
-  EntryView.swift        # composer, entry list, inline editor, markdown renderer
+  EntryView.swift        # composer, entry list, inline editor
+  ArrowNavigation.swift  # ↑/↓ between text boxes (NSEvent monitor)
+  ComposerDivider.swift  # drag handle between list and composer
+  MarkdownText.swift     # renderer for parsed blocks
+  Markdown.swift         # block-level markdown parser
   SidebarView.swift      # day list
-  StorageManager.swift   # flat .md read/write/edit/delete + JournalStore + TaskLine
-Tests/main.swift         # storage + checkbox tests (just test)
+  Storage.swift          # flat .md read/write/edit/delete
+  TaskLine.swift         # checkbox parsing + resolve
+  JournalStore.swift     # observable view-model over Storage
+  Pointer.swift          # the app's single cursor-shape override
+  String+Blank.swift     # trimmed / isBlank
+Tests/main.swift         # storage, checkbox and markdown tests (just test)
 ```
 
 ## TODO
@@ -260,6 +302,7 @@ Tests/main.swift         # storage + checkbox tests (just test)
 - Week/month grouping in the sidebar.
 - Search.
 - Configurable hotkey in-app (hardcoded to `⌘⇧Space`).
-- Draft is lost if the app quits before `⌘↩` — no draft persistence.
+- Composer draft is lost if the app quits before `⌘↩` — no draft persistence. (An
+  entry open in the inline editor *is* saved on quit.)
 - Undo history is in-memory; quitting clears it.
 - New entries always go to today; no back-dating.

@@ -52,17 +52,33 @@ struct SidebarView: View {
 
     /// `2026-08-05` -> `Today` / `Yesterday` / `Tue 5 Aug 2026`
     private func label(for key: String) -> String {
-        let parser = DateFormatter()
-        parser.dateFormat = "yyyy-MM-dd"
-        parser.locale = Locale(identifier: "en_US_POSIX")
-        guard let date = parser.date(from: key) else { return key }
+        guard let date = Self.keyParser.date(from: key) else { return key }
 
         let calendar = Calendar.current
         if calendar.isDateInToday(date) { return "Today" }
         if calendar.isDateInYesterday(date) { return "Yesterday" }
 
-        let display = DateFormatter()
-        display.dateFormat = "EEE d MMM yyyy"
-        return display.string(from: date)
+        return Self.dayLabel.string(from: date)
     }
+
+    // Both built once: a `DateFormatter` is expensive to create, and these ran
+    // twice per row on every render of the list.
+
+    /// Parses the on-disk day key, which is a fixed machine format — hence
+    /// `en_US_POSIX`, which no user locale can shift.
+    private static let keyParser: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
+    /// The visible label, so it follows the user's locale. A template rather than
+    /// a literal `dateFormat`: the fields are ours to choose, the order and the
+    /// separators are the locale's.
+    private static let dayLabel: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("EEE d MMM y")
+        return f
+    }()
 }

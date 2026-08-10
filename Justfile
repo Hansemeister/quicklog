@@ -36,9 +36,10 @@ restart: stop start
 
 # run storage tests
 # Plain executable, not XCTest: XCTest ships with Xcode and this machine has
-# Command Line Tools only.
+# Command Line Tools only. Only the files under test are compiled — JournalStore
+# and the views are dead weight in the test binary.
 test:
-    @swiftc -swift-version 5 -o .build/storage-tests Sources/quicklog/StorageManager.swift Tests/main.swift
+    @swiftc -swift-version 5 -o .build/storage-tests Sources/quicklog/String+Blank.swift Sources/quicklog/Storage.swift Sources/quicklog/TaskLine.swift Sources/quicklog/Markdown.swift Tests/main.swift
     @.build/storage-tests
 
 # copy to /Applications

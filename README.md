@@ -251,6 +251,12 @@ Headers `#`/`##`/`###`, bullets `-`/`*`/`+` with 2-space nesting, checkboxes
     kept, and it lands on today with the view jumping there.
 22. Tick a checkbox and watch the row: it must update in place, not fade out and
     back in.
+23. Open a day with enough entries to overflow the list, scroll up and down, then
+    stop touching the window and run
+    `top -pid $(pgrep -x quicklog) -l 4 -stats pid,cpu,mem`. CPU must fall back to
+    ~0%. Staying pegged means the entry list went lazy again — see the comment on
+    the `VStack` in `EntryView.swift`. CPU *during* scrolling means nothing; only
+    the hands-off reading does.
 
 ## Tests
 

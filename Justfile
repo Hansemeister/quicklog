@@ -2,6 +2,12 @@ app_name := "quicklog"
 bundle := ".build/quicklog.app"
 bin := ".build/release/quicklog"
 
+# Sources compiled into the test binary. Not a glob: `QuicklogApp.swift` owns
+# `@main`, which collides with `Tests/main.swift`, and the views would drag
+# SwiftUI in for nothing. Add a file here when a tested one starts depending on
+# it — the link error says which.
+test_sources := "Sources/quicklog/String+Blank.swift Sources/quicklog/Storage.swift Sources/quicklog/TaskLine.swift Sources/quicklog/Markdown.swift Tests/main.swift"
+
 # list recipes
 default:
     @just --list
@@ -34,12 +40,15 @@ stop:
 # rebuild + restart detached
 restart: stop start
 
-# run storage tests
-# Plain executable, not XCTest: XCTest ships with Xcode and this machine has
-# Command Line Tools only. Only the files under test are compiled — JournalStore
-# and the views are dead weight in the test binary.
+# A plain executable, not XCTest: XCTest ships with Xcode and this machine has
+# Command Line Tools only. `-swift-version 5` matches Package.swift.
+#
+# (Blank line below on purpose — `just --list` shows only the comment block
+# touching the recipe, and shows just its last line.)
+
+# run storage, checkbox and markdown tests
 test:
-    @swiftc -swift-version 5 -o .build/storage-tests Sources/quicklog/String+Blank.swift Sources/quicklog/Storage.swift Sources/quicklog/TaskLine.swift Sources/quicklog/Markdown.swift Tests/main.swift
+    @swiftc -swift-version 5 -o .build/storage-tests {{test_sources}}
     @.build/storage-tests
 
 # copy to /Applications
@@ -60,11 +69,13 @@ today:
 todos:
     @grep -rEn -- "[-*+] ?\[ ?\]" ~/Library/Application\ Support/quicklog/*.md 2>/dev/null || echo "no open todos"
 
+# Depends on `stop`: the single-instance lock lives in that folder, and deleting
+# it under a running instance would let a second one start.
+
 # delete all journal data (asks first)
-# Stops the app first: the single-instance lock lives in that folder, and
-# deleting it under a running instance would let a second one start.
 nuke-data: stop
     @read -p "delete ~/Library/Application Support/quicklog? [y/N] " ok && [ "$ok" = "y" ] && rm -rf ~/Library/Application\ Support/quicklog && echo deleted || echo aborted
 
+# delete build products (including the bundle and the test binary)
 clean:
     rm -rf .build
